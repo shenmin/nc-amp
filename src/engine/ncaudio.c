@@ -16,6 +16,7 @@
 #include <mferror.h>
 #include <math.h>
 #include <string.h>
+#include <stdlib.h>
 #include <stdio.h>
 #include <wchar.h>
 #include <wctype.h>
@@ -373,19 +374,119 @@ static ma_decoder_config nca_cfg(int forPlayback)
     return c;
 }
 
+/* ---- bitrate: average over the *audio payload* only (tags, cover art and metadata
+   blocks excluded); for MP3 the frame-header bitrate is reported for CBR files ---- */
+static ma_uint64 rd_be32(const unsigned char *b) { return ((ma_uint64)b[0] << 24) | (b[1] << 16) | (b[2] << 8) | b[3]; }
+static ma_uint64 rd_le32(const unsigned char *b) { return ((ma_uint64)b[3] << 24) | (b[2] << 16) | (b[1] << 8) | b[0]; }
+
+static int nca_read_at(FILE *f, ma_int64 pos, void *buf, int n)
+{
+    if (pos < 0 || _fseeki64(f, pos, SEEK_SET) != 0) return 0;
+    return (int)fread(buf, 1, (size_t)n, f);
+}
+
+/* MPEG audio frame header bitrate in kbps (0 = not a valid header) */
+static int nca_mp3_hdr_kbps(const unsigned char *h, int *isV1, int *mono)
+{
+    static const short v1l3[16] = {0,32,40,48,56,64,80,96,112,128,160,192,224,256,320,0};
+    static const short v1l2[16] = {0,32,48,56,64,80,96,112,128,160,192,224,256,320,384,0};
+    static const short v1l1[16] = {0,32,64,96,128,160,192,224,256,288,320,352,384,416,448,0};
+    static const short v2l1[16] = {0,32,48,56,64,80,96,112,128,144,160,176,192,224,256,0};
+    static const short v2l23[16] = {0,8,16,24,32,40,48,56,64,80,96,112,128,144,160,0};
+    int ver, layer, bi;
+    if (h[0] != 0xFF || (h[1] & 0xE0) != 0xE0) return 0;
+    ver = (h[1] >> 3) & 3; layer = (h[1] >> 1) & 3; bi = h[2] >> 4;
+    if (ver == 1 || layer == 0 || bi == 0 || bi == 15 || ((h[2] >> 2) & 3) == 3) return 0;
+    *isV1 = ver == 3; *mono = (h[3] >> 6) == 3;
+    if (ver == 3) return layer == 1 ? v1l3[bi] : layer == 2 ? v1l2[bi] : v1l1[bi];
+    return layer == 3 ? v2l1[bi] : v2l23[bi];
+}
+
+static int nca_calc_bitrate(const wchar_t *path, double seconds)
+{
+    FILE *f; ma_int64 size, start = 0, end; unsigned char b[64];
+    const wchar_t *dot = wcsrchr(path, L'.');
+    int hdrKbps = 0, cbrKnown = 0, vbrKnown = 0, kbps;
+    if (seconds <= 0) return 0;
+    f = _wfopen(path, L"rb");
+    if (!f) return 0;
+    _fseeki64(f, 0, SEEK_END); size = _ftelli64(f); end = size;
+    /* leading ID3v2 (any format may carry one) */
+    if (nca_read_at(f, 0, b, 10) == 10 && b[0] == 'I' && b[1] == 'D' && b[2] == '3')
+        start = 10 + (((ma_int64)(b[6] & 0x7F) << 21) | ((b[7] & 0x7F) << 14) | ((b[8] & 0x7F) << 7) | (b[9] & 0x7F)) + ((b[5] & 0x10) ? 10 : 0);
+    /* trailing ID3v1 and APEv2 */
+    if (end - 128 > start && nca_read_at(f, end - 128, b, 3) == 3 && b[0] == 'T' && b[1] == 'A' && b[2] == 'G') end -= 128;
+    if (end - 32 > start && nca_read_at(f, end - 32, b, 32) == 32 && memcmp(b, "APETAGEX", 8) == 0) {
+        ma_int64 t = (ma_int64)rd_le32(b + 12) + ((b[23] & 0x80) ? 32 : 0);
+        if (t > 0 && end - t > start) end -= t;
+    }
+    if (dot && _wcsicmp(dot, L".flac") == 0) {
+        /* skip all metadata blocks (pictures, padding, seek tables...) */
+        ma_int64 p = start;
+        if (nca_read_at(f, p, b, 4) == 4 && memcmp(b, "fLaC", 4) == 0) {
+            p += 4;
+            for (;;) {
+                if (nca_read_at(f, p, b, 4) != 4) break;
+                p += 4 + (((ma_int64)b[1] << 16) | (b[2] << 8) | b[3]);
+                if (b[0] & 0x80) break;
+            }
+            if (p < end) start = p;
+        }
+    } else if (dot && (_wcsicmp(dot, L".ogg") == 0 || _wcsicmp(dot, L".oga") == 0 || _wcsicmp(dot, L".opus") == 0)) {
+        /* header pages (granule 0: id + comment headers, maybe with cover art) */
+        ma_int64 p = start; int pages = 0;
+        while (pages++ < 4096 && nca_read_at(f, p, b, 27 + 0) == 27 && memcmp(b, "OggS", 4) == 0) {
+            unsigned char seg[255]; int nseg = b[26], i; ma_int64 body = 0;
+            ma_uint64 gran = rd_le32(b + 6) | (rd_le32(b + 10) << 32);
+            if (gran != 0 && gran != (ma_uint64)-1) { start = p; break; }
+            if (nca_read_at(f, p + 27, seg, nseg) != nseg) break;
+            for (i = 0; i < nseg; i++) body += seg[i];
+            p += 27 + nseg + body;
+        }
+    } else if (dot && (_wcsicmp(dot, L".m4a") == 0 || _wcsicmp(dot, L".mp4") == 0 || _wcsicmp(dot, L".m4b") == 0)) {
+        /* sum of top-level 'mdat' atoms */
+        ma_int64 p = 0, mdat = 0;
+        while (p + 8 <= size && nca_read_at(f, p, b, 16) >= 8) {
+            ma_int64 sz = (ma_int64)rd_be32(b);
+            if (sz == 1) sz = (ma_int64)((rd_be32(b + 8) << 32) | rd_be32(b + 12));
+            else if (sz == 0) sz = size - p;
+            if (sz < 8) break;
+            if (memcmp(b + 4, "mdat", 4) == 0) mdat += sz;
+            p += sz;
+        }
+        if (mdat > 0) { start = 0; end = mdat; }
+    } else if (dot && (_wcsicmp(dot, L".mp3") == 0 || _wcsicmp(dot, L".mp2") == 0)) {
+        /* first frame header (resync over junk) + Xing / Info / VBRI tag */
+        unsigned char buf[4096]; int n = nca_read_at(f, start, buf, sizeof buf), i;
+        for (i = 0; i + 4 <= n; i++) {
+            int v1 = 0, mono = 0, k = nca_mp3_hdr_kbps(buf + i, &v1, &mono);
+            if (k) {
+                int xo = i + 4 + (v1 ? (mono ? 17 : 32) : (mono ? 9 : 17));
+                hdrKbps = k;
+                if (xo + 4 <= n && memcmp(buf + xo, "Info", 4) == 0) cbrKnown = 1;
+                else if (xo + 4 <= n && memcmp(buf + xo, "Xing", 4) == 0) vbrKnown = 1;
+                else if (i + 40 <= n && memcmp(buf + i + 36, "VBRI", 4) == 0) vbrKnown = 1;
+                break;
+            }
+        }
+    }
+    fclose(f);
+    if (end <= start) return 0;
+    kbps = (int)((double)(end - start) * 8.0 / seconds / 1000.0 + 0.5);
+    if (hdrKbps && !vbrKnown && (cbrKnown || abs(kbps - hdrKbps) * 50 <= hdrKbps)) kbps = hdrKbps;  /* CBR */
+    return kbps;
+}
+
 static void nca_fill_info(ma_decoder *d, const wchar_t *path, nca_info *info)
 {
     ma_format f; ma_uint32 ch = 0, sr = 0; ma_uint64 len = 0;
-    WIN32_FILE_ATTRIBUTE_DATA fa; const wchar_t *dot;
+    const wchar_t *dot;
     memset(info, 0, sizeof(*info));
     if (d->pBackend) ma_data_source_get_data_format(d->pBackend, &f, &ch, &sr, NULL, 0);
     info->channels = (int)ch; info->sample_rate = (int)sr;
     if (d->pBackend && ma_data_source_get_length_in_pcm_frames(d->pBackend, &len) == MA_SUCCESS && sr && len) info->length = (double)len / sr;
     else info->length = -1;
-    if (info->length > 0 && GetFileAttributesExW(path, GetFileExInfoStandard, &fa)) {
-        double bytes = (double)fa.nFileSizeHigh * 4294967296.0 + fa.nFileSizeLow;
-        info->bitrate = (int)(bytes * 8.0 / info->length / 1000.0 + 0.5);
-    }
+    info->bitrate = nca_calc_bitrate(path, info->length);
     dot = wcsrchr(path, L'.');
     if (dot) { int i; for (i = 0; i < 15 && dot[i + 1]; i++) info->codec[i] = (char)towupper(dot[i + 1]); }
 }

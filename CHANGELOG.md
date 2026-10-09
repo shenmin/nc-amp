@@ -1,5 +1,11 @@
 # Changelog
 
+## 1.7.1 - 2026-10-10
+
+- Bitrate readout shows the real average kbps as a plain number up to 4 digits (e.g. 953 for FLAC, 1411 for WAV) instead of abbreviating values above 999 as "1M".
+- Bitrate is computed over the audio data only: ID3v2 / ID3v1 / APE tags, embedded cover art, FLAC metadata blocks, Ogg header pages and non-audio MP4 atoms no longer inflate it; CBR MP3s show their exact frame-header bitrate (e.g. 320).
+- Playlist: a row cut off by the bottom of the list is drawn at its normal position and clipped to the frame; a thin sliver is left empty instead of showing glyph fragments.
+
 ## 1.7.0 - 2026-10-10
 
 First open-source release (GPL-3.0-or-later).

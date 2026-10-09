@@ -16,7 +16,7 @@ uses
 const
   APPNAME = 'nc-amp';
   APPTITLE = 'nc-amp';
-  APPVERSION = '1.7.0';
+  APPVERSION = '1.7.1';
   MAINW = 275;
   MAINH = 116;
   TITLEH = 16;        { ONE title-bar height for both windows (logical; scaled with identical rounding) }
@@ -1415,7 +1415,7 @@ procedure TMainForm.DrawMain(c: TCanvas);
 var
   r: TRect;
   i, j, k, x, y, tw, th, mins, secs, d: Integer;
-  t, len, frac, cyc: Double;
+  t, len, frac, cyc, sz: Double;
   sepw: Integer;
   s, mq: string;
   col: TColor;
@@ -1575,15 +1575,19 @@ begin
   { bitrate / sample rate / channels, on one baseline }
   y := P(49);
   r := LR(100, 36, 166, 16);
-  LcdOut(c, r, P(121), y, 'kbps', 6.6, cInkSoft);
-  LcdOut(c, r, P(162), y, 'kHz', 6.6, cInkSoft);
+  LcdOut(c, r, P(123), y, 'kbps', 6.6, cInkSoft);
+  LcdOut(c, r, P(164), y, 'kHz', 6.6, cInkSoft);
   if FState <> psStopped then
   begin
-    if FBitrate > 999 then s := IntToStr(FBitrate div 1000) + 'M' else s := IntToStr(FBitrate);
-    LcdOut(c, r, P(119) - LcdWidth(c, s, 9), y, s, 9, cInk);
+    { plain average kbps, up to 4 digits (e.g. 1411); 4-digit values get a slightly
+      narrower size so they stay inside the LCD field at every DPI }
+    s := IntToStr(EnsureRange(FBitrate, 0, 9999));
+    sz := 9;
+    while (LcdWidth(c, s, sz) > P(121) - P(104)) and (sz > 6) do sz := sz - 0.25;
+    LcdOut(c, r, P(121) - LcdWidth(c, s, sz), y, s, sz, cInk);
     s := IntToStr(Round(FFreq / 1000));
     if (FFreq mod 1000) <> 0 then s := FormatFloat('0.#', FFreq / 1000);
-    LcdOut(c, r, P(160) - LcdWidth(c, s, 9), y, s, 9, cInk);
+    LcdOut(c, r, P(162) - LcdWidth(c, s, 9), y, s, 9, cInk);
     if FChans = 1 then s := 'mono' else if FChans = 2 then s := 'stereo' else s := IntToStr(FChans) + ' ch';
     LcdOut(c, r, P(262) - LcdWidth(c, s, 6.6), y, s, 6.6, cInkSoft);
   end;
@@ -1653,7 +1657,7 @@ end;
 
 procedure TMainForm.DrawPlaylist(c: TCanvas; H: Integer);
 var
-  r, rr: TRect;
+  r, rr, full: TRect;
   i, y, vis, tw, th, x, k, n: Integer;
   col: TColor;
   s, d: string;
@@ -1696,7 +1700,16 @@ begin
   begin
     y := P(PLT + 3 + (i - FListTop) * ROWH);
     if y >= P(PLT + 2 + LH) then Break;
-    r := Rect(P(9), y, P(266), Min(P(PLT + 2 + LH), P(PLT + 3 + (i - FListTop + 1) * ROWH)));
+    { a row cut by the bottom of the list is laid out at its full height (so the
+      text keeps its normal position) and clipped to the frame; a sliver showing
+      less than 60% of the row is left empty instead of showing glyph fragments }
+    full := Rect(P(9), y, P(266), P(PLT + 3 + (i - FListTop + 1) * ROWH));
+    r := full;
+    if r.Bottom > P(PLT + 2 + LH) then
+    begin
+      r.Bottom := P(PLT + 2 + LH);
+      if (r.Bottom - r.Top) < 0.6 * (full.Bottom - full.Top) then Break;
+    end;
     if FTracks[i].Selected then FillC(c, r, cSel);
     if i = FCur then col := cYellow
     else if FTracks[i].Bad then col := RGB_(150, 70, 60)
@@ -1715,7 +1728,7 @@ begin
       end;
       s := s + '...';
     end;
-    y := r.Top + (r.Bottom - r.Top - th) div 2 + k;
+    y := full.Top + (full.Bottom - full.Top - th) div 2 + k;
     LcdOut(c, rr, rr.Left, y, s, ROWTXT, col);
     LcdOut(c, r, P(253) - tw, y, d, ROWTXT, col);
   end;
