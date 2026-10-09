@@ -99,6 +99,6 @@ scripts/        构建辅助脚本
 
 ## 许可证
 
-Copyright (C) 2026 Shen Min
+Copyright (C) 2026 Shen Min ([https://github.com/shenmin](https://github.com/shenmin))
 
 nc-amp 是自由软件：你可以依据自由软件基金会发布的 GNU 通用公共许可证第 3 版或（由你选择）任何更新版本的条款，重新分发和/或修改它。详见 [LICENSE](LICENSE)。

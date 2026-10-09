@@ -99,6 +99,6 @@ Full licence texts: [THIRD-PARTY-LICENSES.md](THIRD-PARTY-LICENSES.md).
 
 ## License
 
-Copyright (C) 2026 Shen Min
+Copyright (C) 2026 Shen Min ([https://github.com/shenmin](https://github.com/shenmin))
 
 nc-amp is free software: you can redistribute it and/or modify it under the terms of the GNU General Public License as published by the Free Software Foundation, either version 3 of the License, or (at your option) any later version. See [LICENSE](LICENSE).
