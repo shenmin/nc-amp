@@ -1,0 +1,20 @@
+# build output
+/build/
+/dist/
+/src/bin/
+/src/lib/
+/src/backup/
+/src/engine/*.dll
+/src/ncamp.res
+/src/nc-amp.res
+*.o
+*.ppu
+*.a
+*.exe
+*.dll
+*.compiled
+*.lps
+__pycache__/
+*.pyc
+.DS_Store
+Thumbs.db

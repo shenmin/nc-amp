@@ -1,0 +1,41 @@
+# Changelog
+
+## 1.7.0 - 2026-10-10
+
+First open-source release (GPL-3.0-or-later).
+
+- New audio engine `ncaudio` built only from open-source components: miniaudio (output, MP3 / FLAC / WAV), stb_vorbis (Ogg Vorbis), libopus + opusfile + libogg (Opus) and the Windows Media Foundation decoder (M4A / AAC). The proprietary BASS library and its plug-ins are gone.
+- Real-time spectrum computed by our own 1024-point Hann-windowed FFT on the output.
+- Tag reader rewritten to parse ID3v1 / ID3v2, FLAC and Ogg Vorbis comments and MP4 atoms directly from the file.
+- Sample-accurate seeking in Ogg Vorbis and fast seeking in MP3.
+- About box shows the licence and the project URL.
+
+## 1.6.6
+
+- Single instance: a second start forwards its files to the running copy (or just brings it to the front).
+
+## 1.6.5
+
+- New app icon: 'nc' in IBM Plex Mono Medium, slimmer bezel, larger LCD face, hand-hinted small sizes.
+- Playlist title left-aligned like the main window; removed "Always on top".
+
+## 1.6.4
+
+- Tray menu: no bold default item.
+
+## 1.6.3
+
+- Own tray icon implementation (Shell_NotifyIconW v4, per-monitor-v2 window): native system-font menu and DPI-correct icon.
+
+## 1.6.2
+
+- Removed the minimize button; shade glyph points up / down; all menus are native Windows menus.
+- No taskbar button; notification-area icon with playback menu.
+
+## 1.6.1
+
+- Main and playlist title bars share one height at every DPI and size; shaded bars line up exactly.
+
+## 1.6
+
+- Shade mode redesigned: title-bar-high bar with mini transport buttons, time and seek strip; independent playlist shade.

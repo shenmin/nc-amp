@@ -1,0 +1,5 @@
+# Upstream source releases fetched by scripts/fetch-deps.sh (verified by SHA-256).
+# name            url                                                              sha256
+libogg-1.3.5      https://downloads.xiph.org/releases/ogg/libogg-1.3.5.tar.gz       0eb4b4b9420a0f51db142ba3f9c64b333f826532dc0f48c6410ae51f4799b664
+opus-1.5.2        https://downloads.xiph.org/releases/opus/opus-1.5.2.tar.gz        65c1d2f78b9f2fb20082c38cbe47c951ad5839345876e46941612ee87f9a7ce1
+opusfile-0.12     https://downloads.xiph.org/releases/opus/opusfile-0.12.tar.gz     118d8601c12dd6a44f52423e68ca9083cc9f2bfe72da7a8c1acb22a80ae3550b

@@ -1,0 +1,107 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<CONFIG>
+  <ProjectOptions>
+    <Version Value="12"/>
+    <General>
+      <SessionStorage Value="InProjectDir"/>
+      <Title Value="nc-amp"/>
+      <Scaled Value="False"/>
+      <ResourceType Value="res"/>
+      <UseXPManifest Value="False"/>
+      <Icon Value="0"/>
+    </General>
+    <VersionInfo>
+      <UseVersionInfo Value="True"/>
+      <MajorVersionNr Value="1"/>
+      <MinorVersionNr Value="7"/>
+      <RevisionNr Value="0"/>
+      <StringTable FileDescription="nc-amp - classic style music player" ProductName="nc-amp" ProductVersion="1.7.0" InternalName="nc-amp" LegalCopyright="Copyright (C) 2026 Shen Min" Comments="GPL-3.0-or-later" OriginalFilename="nc-amp.exe"/>
+    </VersionInfo>
+    <BuildModes Count="1">
+      <Item1 Name="Default" Default="True"/>
+    </BuildModes>
+    <PublishOptions>
+      <Version Value="2"/>
+    </PublishOptions>
+    <RunParams>
+      <FormatVersion Value="2"/>
+    </RunParams>
+    <RequiredPackages Count="1">
+      <Item1>
+        <PackageName Value="LCL"/>
+      </Item1>
+    </RequiredPackages>
+    <Units Count="8">
+      <Unit0>
+        <Filename Value="nc-amp.lpr"/>
+        <IsPartOfProject Value="True"/>
+      </Unit0>
+      <Unit1>
+        <Filename Value="mainform.pas"/>
+        <IsPartOfProject Value="True"/>
+        <ComponentName Value="Form1"/>
+        <HasResources Value="True"/>
+        <ResourceBaseClass Value="Form"/>
+        <UnitName Value="MainForm"/>
+      </Unit1>
+      <Unit2>
+        <Filename Value="ncaudio.pas"/>
+        <IsPartOfProject Value="True"/>
+        <UnitName Value="NcAudio"/>
+      </Unit2>
+      <Unit3>
+        <Filename Value="tagreader.pas"/>
+        <IsPartOfProject Value="True"/>
+        <UnitName Value="TagReader"/>
+      </Unit3>
+      <Unit4>
+        <Filename Value="titlefont.pas"/>
+        <IsPartOfProject Value="True"/>
+        <UnitName Value="TitleFont"/>
+      </Unit4>
+      <Unit5>
+        <Filename Value="dpiinit.pas"/>
+        <IsPartOfProject Value="True"/>
+        <UnitName Value="DpiInit"/>
+      </Unit5>
+      <Unit6>
+        <Filename Value="nctray.pas"/>
+        <IsPartOfProject Value="True"/>
+        <UnitName Value="NcTray"/>
+      </Unit6>
+      <Unit7>
+        <Filename Value="singleinst.pas"/>
+        <IsPartOfProject Value="True"/>
+        <UnitName Value="SingleInst"/>
+      </Unit7>
+    </Units>
+  </ProjectOptions>
+  <CompilerOptions>
+    <Version Value="11"/>
+    <Target>
+      <Filename Value="bin/nc-amp"/>
+    </Target>
+    <SearchPaths>
+      <IncludeFiles Value="$(ProjOutDir)"/>
+      <UnitOutputDirectory Value="lib/$(TargetCPU)-$(TargetOS)"/>
+    </SearchPaths>
+    <CodeGeneration>
+      <TargetCPU Value="x86_64"/>
+      <TargetOS Value="win64"/>
+      <Optimizations>
+        <OptimizationLevel Value="2"/>
+      </Optimizations>
+    </CodeGeneration>
+    <Linking>
+      <Debugging>
+        <GenerateDebugInfo Value="False"/>
+        <StripSymbols Value="True"/>
+      </Debugging>
+      <Options>
+        <Win32>
+          <GraphicApplication Value="True"/>
+        </Win32>
+      </Options>
+    </Linking>
+  </CompilerOptions>
+</CONFIG>

@@ -1,0 +1,18 @@
+object Form1: TMainForm
+  Left = 300
+  Height = 116
+  Top = 120
+  Width = 275
+  BorderStyle = bsNone
+  Caption = 'nc-amp'
+  ClientHeight = 116
+  ClientWidth = 275
+  Color = 2500134
+  DesignTimePPI = 96
+  OnCreate = FormCreate
+  OnDestroy = FormDestroy
+  OnPaint = FormPaint
+  OnShow = FormShow
+  Scaled = False
+  ShowInTaskBar = stNever
+end
