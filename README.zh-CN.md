@@ -1,6 +1,6 @@
-<p align="right"><a href="README.md">English</a> | 简体中文</p>
-
 # nc-amp
+
+[English](README.md) | 简体中文
 
 nc-amp —— 基于 Free Pascal/Lazarus 的 Windows 原生开源音乐播放器，经典 Winamp 风格界面，支持 MP3、FLAC、WAV、Ogg、Opus、M4A 等格式，拖入即随机循环播放。
 
@@ -9,7 +9,7 @@ nc-amp —— 基于 Free Pascal/Lazarus 的 Windows 原生开源音乐播放器
 [![Platform: Windows](https://img.shields.io/badge/platform-Windows%20x64-0078d6.svg)](https://github.com/shenmin/nc-amp/releases)
 [![Made with Lazarus](https://img.shields.io/badge/Lazarus%20%2F%20Free%20Pascal-Pascal-orange.svg)](https://www.lazarus-ide.org)
 
-![nc-amp 截图](docs/screenshot.png)
+![nc-amp 截图](docs/nc-amp-screenshot.png)
 
 ## 功能特性
 

@@ -1,6 +1,6 @@
-<p align="right">English | <a href="README.zh-CN.md">简体中文</a></p>
-
 # nc-amp
+
+English | [简体中文](README.zh-CN.md)
 
 nc-amp - a native Free Pascal/Lazarus music player for Windows with a classic Winamp-style look.
 
@@ -9,7 +9,7 @@ nc-amp - a native Free Pascal/Lazarus music player for Windows with a classic Wi
 [![Platform: Windows](https://img.shields.io/badge/platform-Windows%20x64-0078d6.svg)](https://github.com/shenmin/nc-amp/releases)
 [![Made with Lazarus](https://img.shields.io/badge/Lazarus%20%2F%20Free%20Pascal-Pascal-orange.svg)](https://www.lazarus-ide.org)
 
-![nc-amp screenshot](docs/screenshot.png)
+![nc-amp screenshot](docs/nc-amp-screenshot.png)
 
 ## Features
 
