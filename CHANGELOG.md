@@ -1,5 +1,12 @@
 # Changelog
 
+## 1.7.8 - 2026-10-10
+
+- Playback pauses automatically when the output device changes while playing: headphones or earbuds unplugged or turned off, Bluetooth earbuds connecting, or the Windows default output switching to another device. It works like a phone pausing when the headphones come out. nc-amp still switches to the new default device; the song stays at its position, the LCD shows the paused state, and Play continues on the new device. The paused state is saved at once, so a restart stays paused.
+- Only a real change of device pauses. Recoveries that bring back the same device keep playing: a stopped or interrupted device, a stuck stream, or the same device returning at another sample rate. So does a device appearing when there was none at start-up, as when auto-resuming at launch with no device yet.
+- A burst of changes within 10 s counts as one change (e.g. Bluetooth earbuds switching from the headset to the stereo profile), so there is only one pause. If Play is pressed while the device settles, playback keeps going on the final device. If playback was already paused or stopped, the device switches silently.
+- Every automatic pause is logged (NCAMP_LOG) with its reason and the old and new device. New test modes for NCAMP_TEST_DEVICE: change, remove, reroute, stuck and rate.
+
 ## 1.7.7 - 2026-10-10
 
 - Fixed: some MP3 files never ended. The time ran on past the duration (e.g. 30:33 on a 3:33 song) while the song repeated from the beginning, and the next track never started. This affected MP3 files without a Xing/Info header. The player asked for the track length several times per screen refresh, and for such files the decoder answers by rescanning the whole file and seeking back. In the last fraction of a second of some files, typically ones ending in an APE/ID3v1 tag, that seek-back fails. The failure left the decoder believing it was at the start, and the next length query moved the stream back there. The length is now measured once when a track is opened (and again when the decoder is rebuilt for a new output device), so the file is no longer rescanned during playback. A seek that fails near the end of a track now ends the track.

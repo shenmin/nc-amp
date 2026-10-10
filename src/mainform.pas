@@ -16,7 +16,7 @@ uses
 const
   APPNAME = 'nc-amp';
   APPTITLE = 'nc-amp';
-  APPVERSION = '1.7.7';
+  APPVERSION = '1.7.8';
   MAINW = 275;
   MAINH = 116;
   TITLEH = 16;        { ONE title-bar height for both windows (logical; scaled with identical rounding) }
@@ -3107,6 +3107,7 @@ var
   dur, rawPos: Double;
   st: Integer;
   plDirty: Boolean;
+  why: array[0..599] of AnsiChar;
 begin
   UpdateTrayTip;
   if FShadeTip <> nil then FShadeTip.Poll;   { hover tracking of the shade tooltip }
@@ -3118,6 +3119,15 @@ begin
   if AudioLoaded then
   begin
     nca_poll();                         { restart a stopped device, log reroutes }
+    if nca_take_autopause(@why[0], SizeOf(why)) <> 0 then
+    begin
+      { the output device changed while playing (headphones unplugged, earbuds connected,
+        default switched): the engine paused at the current position; Play continues on
+        the new device. The state change is saved at once, so a restart stays paused too. }
+      DebugLog('auto-pause: ' + string(PAnsiChar(@why[0])));
+      if FState = psPlaying then FState := psPaused;
+      InvalidateAll;
+    end;
     if GetTickCount64 - FDiagTick >= 3000 then
     begin
       FDiagTick := GetTickCount64;

@@ -327,7 +327,17 @@ static volatile float g_peakOut = 0; static volatile LONG g_cbCount = 0, g_cbFra
 static volatile int g_reopening = 0, g_devInited = 0, g_pollEnabled = 0;
 static volatile int g_needRestart = 0, g_needDescribe = 0, g_shuttingDown = 0;
 static wchar_t g_path[MAX_PATH * 4];
-static WCHAR g_openId[512];   /* default render endpoint id when the device was opened */
+static WCHAR g_openId[512];   /* default render endpoint id when the device was opened ("" = none / unknown) */
+/* auto-pause on a real output-device change (1.7.8) */
+#define NCA_SETTLE_MS 10000         /* changes closer together than this are one event (BT HFP <-> A2DP flips) */
+static ULONGLONG g_lastChange = 0;
+static volatile int g_autoPaused = 0;
+static char g_autoWhy[600];
+/* NCAMP_TEST_DEVICE hooks: simulated default endpoint (g_testDefOn), forced device rate, no device until */
+static int g_testMode = -1, g_testDefOn = 0, g_testRate = 0, g_testStuck = 0;
+static WCHAR g_testDef[64];
+static ULONGLONG g_testNoDevUntil = 0;
+static void nca_test_init(void);
 static char g_log[16384]; static CRITICAL_SECTION g_logCs; static int g_logCsOk = 0;
 
 static void cb(ma_device *dev, void *out, const void *in, ma_uint32 frames)
@@ -459,14 +469,12 @@ static int nca_device_open(void)
 {
     ma_device_config dc = ma_device_config_init(ma_device_type_playback);
     ma_result r;
-    {   /* NCAMP_TEST_DEVICE=nodev: pretend no output device exists for the first 6 s */
-        static ULONGLONG until = 0; char v[16] = "";
-        if (!until) { GetEnvironmentVariableA("NCAMP_TEST_DEVICE", v, sizeof v); until = strcmp(v, "nodev") == 0 ? GetTickCount64() + 6000 : 1; }
-        if (GetTickCount64() < until) { snprintf(g_err, sizeof g_err, "no audio output device (TEST)"); nca_log("%s", g_err); return 0; }
+    if (GetTickCount64() < g_testNoDevUntil) {   /* NCAMP_TEST_DEVICE=nodev|remove */
+        snprintf(g_err, sizeof g_err, "no audio output device (TEST)"); nca_log("%s", g_err); return 0;
     }
     dc.playback.format = ma_format_f32;
     dc.playback.channels = 2;
-    dc.sampleRate = 0;                  /* device native rate */
+    dc.sampleRate = g_testRate;         /* 0 = device native rate */
     dc.dataCallback = cb;
     dc.notificationCallback = nca_notify;
     dc.performanceProfile = ma_performance_profile_conservative;
@@ -483,6 +491,7 @@ static void nca_remember_endpoint(void);
 NCA_API int nca_init(void)
 {
     nca_setup();
+    nca_test_init();
     if (g_devOk) return 1;
     g_pollEnabled = 1;                  /* even without a device: nca_poll keeps retrying */
     if (!nca_device_open()) return 0;
@@ -799,13 +808,13 @@ static const GUID nca_CLSID_MMDeviceEnumerator = {0xBCDE0395, 0xE52F, 0x467C, {0
 static const GUID nca_IID_IMMDeviceEnumerator  = {0xA95664D2, 0x9614, 0x4F35, {0xA7, 0x46, 0xDE, 0x8D, 0xB6, 0x36, 0x17, 0xE6}};
 
 /* id + state of the current default render (console) endpoint; 0 = unavailable */
-static int g_testFakeDefault = 0;   /* NCAMP_TEST_DEVICE=reopen: simulated endpoints */
 static int nca_default_endpoint(WCHAR *id, int cap, DWORD *state)
 {
     IMMDeviceEnumerator *e = NULL; IMMDevice *d = NULL; LPWSTR s = NULL; int ok = 0;
     HRESULT ci;
-    if (g_testFakeDefault) {
-        _snwprintf(id, cap, L"{TEST}.{earbuds-%d}", g_testFakeDefault);
+    if (g_testDefOn) {                  /* NCAMP_TEST_DEVICE: simulated endpoint ("" = none) */
+        if (!g_testDef[0]) return 0;
+        wcsncpy(id, g_testDef, cap - 1); id[cap - 1] = 0;
         if (state) *state = DEVICE_STATE_ACTIVE;
         return 1;
     }
@@ -830,18 +839,63 @@ static void nca_remember_endpoint(void)
     else nca_log("default endpoint id: unavailable (backend %s)", ma_get_backend_name(g_dev.pContext->backend));
 }
 
+/* Auto-pause (1.7.8): called whenever the endpoint we play on may have changed. A *real* change
+   is a different endpoint id than before (another default, or none at all) - like headphones
+   being unplugged on a phone, playback pauses at the current position. Not a change:
+   - same endpoint id: internal recoveries (stuck-stream watchdog, stopped / interrupted device,
+     decoder rebuild for a new rate) only bring back the device the listener is already using;
+   - no endpoint before ("" - nothing open yet, e.g. no device at start-up while auto-resuming):
+     nothing was taken away from the listener.
+   Changes closer together than NCA_SETTLE_MS (Bluetooth connect: HFP -> A2DP, default switching
+   twice, ...) are one event: only the first can pause, so a Play pressed while things settle is
+   not undone and playback continues on the final default device. */
+static void nca_endpoint_check(const WCHAR *oldId, const WCHAR *newId, const char *why)
+{
+    ULONGLONG now = GetTickCount64(); int burst, paused = 0;
+    const WCHAR *nw = newId[0] ? newId : L"(none)";
+    if (!oldId[0] || wcscmp(oldId, newId) == 0) return;
+    burst = g_lastChange && now - g_lastChange < NCA_SETTLE_MS;
+    g_lastChange = now;
+    if (burst) { nca_log("device change %ls -> %ls (%s): part of the same change, no pause", oldId, nw, why); return; }
+    ma_mutex_lock(&g_lock);
+    if (g_dec && g_state == NCA_PLAYING) { g_state = NCA_PAUSED; paused = 1; }
+    ma_mutex_unlock(&g_lock);
+    if (paused) {
+        snprintf(g_autoWhy, sizeof g_autoWhy, "output device changed (%s): %ls -> %ls", why, oldId, nw);
+        g_autoPaused = 1;
+        nca_log("auto-pause: %s", g_autoWhy);
+    } else nca_log("device change %ls -> %ls (%s): not playing, switched silently", oldId, nw, why);
+}
+
+/* the UI asks after every nca_poll: 1 = playback was paused because the device changed */
+NCA_API int nca_take_autopause(char *buf, int cap)
+{
+    if (!g_autoPaused) return 0;
+    g_autoPaused = 0;
+    if (buf && cap > 0) { strncpy(buf, g_autoWhy, cap - 1); buf[cap - 1] = 0; }
+    return 1;
+}
+
 /* tear the device down and open it again on the current default endpoint, keeping the
-   track, its position and the play state */
+   track, its position and the play state (except for an auto-pause, see above) */
 static void nca_reopen(const char *why)
 {
+    WCHAR oldId[512];
+    wcscpy(oldId, g_openId);
     nca_log("reopening audio device: %s", why);
     g_reopening = 1;
     if (g_devInited) { ma_device_uninit(&g_dev); g_devInited = 0; }
     g_devOk = 0;
-    if (!nca_device_open()) { g_reopening = 0; nca_log("reopen failed, will retry in 2 s"); return; }
+    if (!nca_device_open()) {
+        g_reopening = 0; nca_log("reopen failed, will retry in 2 s");
+        g_openId[0] = 0;                /* no device now */
+        nca_endpoint_check(oldId, L"", why);
+        return;
+    }
     g_devInited = 1; g_devOk = 1;
     g_reopening = 0;
     nca_remember_endpoint();
+    nca_endpoint_check(oldId, g_openId, why);   /* before a rebuild, which keeps the (paused) state */
     if (g_dec && g_path[0] && g_dec->outputSampleRate != g_dev.sampleRate) {
         /* the decoder resamples to the device rate: rebuild it at the new rate, same position */
         ma_decoder *d = (ma_decoder*)malloc(sizeof(ma_decoder)), *old; ma_decoder_config cfg = nca_cfg(1);
@@ -870,16 +924,54 @@ static void nca_reopen(const char *why)
     nca_describe();
 }
 
+/* NCAMP_TEST_DEVICE=<mode>: simulated device events (Wine has no real endpoints). Times are from
+   the first nca_poll. Real changes (should auto-pause once): reopen (+5 s a default appears from
+   nothing - no pause, +10 s it switches - pause), change (+5 s speakers -> earbuds-hfp, +9 s ->
+   earbuds-a2dp), remove (+5 s earbuds unplugged, no device for 4 s, then speakers), reroute (+5 s
+   miniaudio reroutes to new earbuds). Not changes (no pause): stop (device stops, same endpoint),
+   stuck (callback watchdog), rate (same endpoint comes back at 44.1 kHz: decoder rebuild),
+   nodev (no device for the first 6 s at start-up). */
+static void nca_test_init(void)
+{
+    char v[16] = "";
+    if (g_testMode >= 0) return;
+    GetEnvironmentVariableA("NCAMP_TEST_DEVICE", v, sizeof v);
+    g_testMode = !strcmp(v, "stop") ? 1 : !strcmp(v, "reopen") ? 2 : !strcmp(v, "nodev") ? 4 : !strcmp(v, "change") ? 5 :
+                 !strcmp(v, "remove") ? 6 : !strcmp(v, "stuck") ? 7 : !strcmp(v, "rate") ? 8 : !strcmp(v, "reroute") ? 9 : 0;
+    if (g_testMode == 4) g_testNoDevUntil = GetTickCount64() + 6000;
+    if (g_testMode == 1 || g_testMode >= 5) { g_testDefOn = 1; wcscpy(g_testDef, g_testMode == 6 ? L"{TEST}.{earbuds}" : L"{TEST}.{speakers}"); }
+}
+
+static void nca_test_set(const WCHAR *id) { g_testDefOn = 1; wcscpy(g_testDef, id); }
+
+static void nca_test_step(ULONGLONG t, int *step)
+{
+    int m = g_testMode;
+    if (m <= 0 || m == 4) return;
+    if (*step == 0 && t >= 5000) {
+        (*step)++;
+        if (m == 1) { nca_log("TEST: simulating device stop"); ma_device_stop(&g_dev); }
+        if (m == 2) { nca_log("TEST: earbuds connected, become the default endpoint"); nca_test_set(L"{TEST}.{earbuds-1}"); }
+        if (m == 5) { nca_log("TEST: earbuds connected (HFP), default speakers -> earbuds"); nca_test_set(L"{TEST}.{earbuds-hfp}"); }
+        if (m == 6) { nca_log("TEST: earbuds unplugged, no device for 4 s"); nca_test_set(L""); g_testNoDevUntil = GetTickCount64() + 4000; ma_device_stop(&g_dev); }
+        if (m == 7) { nca_log("TEST: callbacks stall"); g_testStuck = 1; }
+        if (m == 8) { nca_log("TEST: same device comes back at 44100 Hz"); g_testRate = 44100; g_needRestart = 1; }
+        if (m == 9) { nca_log("TEST: miniaudio reroutes to new earbuds"); nca_test_set(L"{TEST}.{earbuds}"); g_needDescribe = 1; }
+    }
+    if (*step == 1 && t >= 9000 && (m == 5 || m == 6)) {
+        (*step)++;
+        if (m == 5) { nca_log("TEST: earbuds switch HFP -> A2DP endpoint"); nca_test_set(L"{TEST}.{earbuds-a2dp}"); }
+        if (m == 6) { nca_log("TEST: speakers become the default"); nca_test_set(L"{TEST}.{speakers}"); }
+    }
+    if (*step == 1 && t >= 10000 && m == 2) { (*step)++; nca_log("TEST: default endpoint switched again"); nca_test_set(L"{TEST}.{earbuds-2}"); }
+}
+
 /* Called from the UI thread several times a second. */
 NCA_API void nca_poll(void)
 {
-    static ULONGLONG lastCheck = 0, testAt = 0; static LONG lastCb = 0; static int testMode = -1;
+    static ULONGLONG lastCheck = 0, t0 = 0; static LONG lastCb = 0; static int step = 0;
     ULONGLONG now = GetTickCount64();
-    if (testMode < 0) {          /* NCAMP_TEST_DEVICE=stop|reopen: simulate a lost device after 5 s */
-        char v[16] = ""; GetEnvironmentVariableA("NCAMP_TEST_DEVICE", v, sizeof v);
-        testMode = strcmp(v, "stop") == 0 ? 1 : strcmp(v, "reopen") == 0 ? 2 : 0;
-        testAt = now + 5000;
-    }
+    if (!t0) t0 = now;
     if (g_shuttingDown) return;
     if (g_endReason) {
         int r = g_endReason; g_endReason = 0;
@@ -890,10 +982,14 @@ NCA_API void nca_poll(void)
         if (now - lastCheck >= 2000) { lastCheck = now; nca_reopen("retry"); }
         return;
     }
-    if (testMode == 1 && now >= testAt) { nca_log("TEST: simulating device stop"); ma_device_stop(&g_dev); testMode = 0; }
-    if (testMode == 2 && now >= testAt) { nca_log("TEST: earbuds connected, become the default endpoint"); g_testFakeDefault = 1; testMode = 3; testAt = now + 5000; }
-    if (testMode == 3 && now >= testAt) { nca_log("TEST: default endpoint switched again"); g_testFakeDefault = 2; testMode = 0; }
-    if (g_needDescribe) { g_needDescribe = 0; nca_log("rerouted by miniaudio"); nca_remember_endpoint(); nca_describe(); }
+    nca_test_step(now - t0, &step);
+    if (g_needDescribe) {        /* miniaudio followed the default device by itself (WASAPI stream routing) */
+        WCHAR oldId[512];
+        g_needDescribe = 0; wcscpy(oldId, g_openId);
+        nca_log("rerouted by miniaudio"); nca_remember_endpoint();
+        nca_endpoint_check(oldId, g_openId, "rerouted to the new default");
+        nca_describe();
+    }
     if (g_needRestart) { g_needRestart = 0; nca_reopen("device stopped / interrupted"); lastCheck = now; return; }
     if (now - lastCheck < 2000) return;
     lastCheck = now;
@@ -911,7 +1007,7 @@ NCA_API void nca_poll(void)
     }
     {   /* callbacks stalled although the device claims to run (stuck stream) */
         LONG cbs = g_cbTotal;
-        if (cbs == lastCb) { nca_reopen("no audio callbacks for 2 s"); lastCb = g_cbTotal; return; }
+        if (cbs == lastCb || g_testStuck) { g_testStuck = 0; nca_reopen("no audio callbacks for 2 s"); lastCb = g_cbTotal; return; }
         lastCb = cbs;
     }
 }

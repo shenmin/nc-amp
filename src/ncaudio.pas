@@ -45,6 +45,8 @@ var
   nca_take_log: function(buf: PAnsiChar; cap: Integer): Integer; cdecl;
   nca_take_peak: function(callbacks, frames: PInteger): Single; cdecl;
   nca_poll: procedure; cdecl;
+  { 1.7.8: 1 = playback was paused because the output device changed; reason in buf }
+  nca_take_autopause: function(buf: PAnsiChar; cap: Integer): Integer; cdecl;
 
   AudioLoaded: Boolean = False;     { DLL loaded and functions resolved }
   AudioReady: Boolean = False;      { output device running }
@@ -172,6 +174,7 @@ begin
     Pointer(nca_take_log) := GP('nca_take_log');
     Pointer(nca_take_peak) := GP('nca_take_peak');
     Pointer(nca_poll) := GP('nca_poll');
+    Pointer(nca_take_autopause) := GP('nca_take_autopause');
   except
     on E: Exception do
     begin
