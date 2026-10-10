@@ -120,6 +120,8 @@ type
     FShadeTip: TNcTip;
     FShadeTipKey: string;
     procedure UpdateShadeTip;
+    procedure LcdTipDraw(DC: HDC; const R: TRect; const S: string; Measure: Boolean;
+      MaxW: Integer; out W, H: Integer);
     procedure TimerTick(Sender: TObject);
     procedure ResumeLast;
     procedure AutoSave;
@@ -2465,6 +2467,10 @@ begin
   begin
     if not FShade then Exit;
     FShadeTip := TNcTip.Create(Handle);
+    { LCD look: pale green LCD background, LCD ink, border in the LCD frame colour }
+    FShadeTip.SetColors(ColorToRGB(cSage), ColorToRGB(cInk), RGB(24, 24, 24));
+    { comparison only: NCAMP_TIP_FONT=lcd renders the text with the LCD fonts }
+    if SameText(GetEnvironmentVariable('NCAMP_TIP_FONT'), 'lcd') then FShadeTip.OnDraw := @LcdTipDraw;
     FShadeTipKey := '';
     DebugLog(Format('shade tooltip created: hwnd=%d', [FShadeTip.Wnd]));
   end;
@@ -2482,11 +2488,39 @@ begin
     else
       FShadeTip.SetRects([]);
     DebugLog(Format('shade tooltip: shade=%s dpi=%d scale=%.3f', [BoolToStr(FShade, True), FDpiMain, FScaleMain]));
-  end
-  else
-    FShadeTip.SetDpi(FDpiMain);   { re-applies the font if the system replaced it }
+  end;
   if FShade and (FCur >= 0) and (FCur < FCount) then t := DisplayTitle(FCur) else t := '';
   FShadeTip.SetText(t);
+end;
+
+{ NCAMP_TIP_FONT=lcd: tooltip text in the LCD fonts (mono Latin + UI font for CJK),
+  at the LCD title size; for visual comparison only }
+procedure TMainForm.LcdTipDraw(DC: HDC; const R: TRect; const S: string; Measure: Boolean;
+  MaxW: Integer; out W, H: Integer);
+var
+  c: TCanvas;
+  oldG: Double;
+  lh, b: Integer;
+begin
+  W := 0; H := 0;
+  oldG := G;
+  G := FScaleMain;
+  c := TCanvas.Create;
+  try
+    c.Handle := DC;
+    if Measure then
+    begin
+      W := LcdWidth(c, S, MQ_H);
+      LcdMetrics(c, MQ_H, lh, b);
+      H := lh;
+    end
+    else
+      LcdInRect(c, R, R.Left, S, MQ_H, cInk);
+    c.Handle := 0;
+  finally
+    c.Free;
+    G := oldG;
+  end;
 end;
 
 function TMainForm.DisplayTitle(i: Integer): string;
@@ -3052,6 +3086,7 @@ var
   plDirty: Boolean;
 begin
   UpdateTrayTip;
+  if FShadeTip <> nil then FShadeTip.Poll;   { hover tracking of the shade tooltip }
   if (FOsdUntil <> 0) and (FDragging = bNone) and (GetTickCount64 >= FOsdUntil) then
   begin
     FOsdUntil := 0;           { readout expired: back to the song title }

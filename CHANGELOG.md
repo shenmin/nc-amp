@@ -2,7 +2,7 @@
 
 ## 1.7.6 - 2026-10-10
 
-- When the main window is collapsed (shade mode), hovering the empty part of the bar shows the current song title in a native Windows tooltip, using the system tooltip font at the monitor's DPI. The text follows track changes while it is shown. Buttons, time and seek strip show no tooltip, nothing is shown when no track is loaded, and the expanded window is unchanged.
+- When the main window is collapsed (shade mode), hovering the empty part of the bar shows the current song title in a tooltip styled like the LCD: pale green LCD background, dark LCD text, a thin border in the LCD frame colour, and equal padding on all four sides with the text vertically centred. It uses the system UI font at the tooltip size for the monitor's DPI; padding, border and wrap width (long titles wrap at about 480 px) scale with the DPI. The text follows track changes while it is shown. Buttons, time and seek strip show no tooltip, nothing is shown when no track is loaded, and the expanded window is unchanged.
 
 ## 1.7.5 - 2026-10-10
 
