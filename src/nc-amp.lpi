@@ -14,8 +14,8 @@
       <UseVersionInfo Value="True"/>
       <MajorVersionNr Value="1"/>
       <MinorVersionNr Value="7"/>
-      <RevisionNr Value="2"/>
-      <StringTable FileDescription="nc-amp - classic style music player" ProductName="nc-amp" ProductVersion="1.7.2" InternalName="nc-amp" LegalCopyright="Copyright (C) 2026 Shen Min" Comments="GPL-3.0-or-later" OriginalFilename="nc-amp.exe"/>
+      <RevisionNr Value="3"/>
+      <StringTable FileDescription="nc-amp - classic style music player" ProductName="nc-amp" ProductVersion="1.7.3" InternalName="nc-amp" LegalCopyright="Copyright (C) 2026 Shen Min" Comments="GPL-3.0-or-later" OriginalFilename="nc-amp.exe"/>
     </VersionInfo>
     <BuildModes Count="1">
       <Item1 Name="Default" Default="True"/>

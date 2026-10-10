@@ -16,7 +16,7 @@ uses
 const
   APPNAME = 'nc-amp';
   APPTITLE = 'nc-amp';
-  APPVERSION = '1.7.2';
+  APPVERSION = '1.7.3';
   MAINW = 275;
   MAINH = 116;
   TITLEH = 16;        { ONE title-bar height for both windows (logical; scaled with identical rounding) }
@@ -82,6 +82,8 @@ type
     FListTop, FFocus, FAnchor, FScanPos: Integer;
     FBitrate, FFreq, FChans, FFailStreak: Integer;
     FDiagTick: QWord;   { last audio-output diagnostics log }
+    FOsdSlider: TBtnId; { bVol / bBal: value readout shown in the LCD title line }
+    FOsdUntil: QWord;   { readout stays until this tick after release / wheel }
     FShowRemaining: Boolean;
     FStatusMsg: string;
     FDpiMain, FDpiPL: Integer;
@@ -103,6 +105,8 @@ type
     FResizeStartY, FResizeStartRows: Integer;
     procedure TimerTick(Sender: TObject);
     procedure LogEngine;
+    function OsdText: string;
+    procedure ShowOsd(id: TBtnId);
     procedure DiagOutput;
     procedure BuildMenus;
   private
@@ -1423,7 +1427,7 @@ var
   i, j, k, x, y, tw, th, mins, secs, d: Integer;
   t, len, frac, cyc, sz: Double;
   sepw: Integer;
-  s, mq: string;
+  s, mq, osd: string;
   col: TColor;
   blink: Boolean;
 const
@@ -1547,6 +1551,7 @@ begin
   r := LR(100, 22, 166, 30);
   FillC(c, r, cSage);
   Frame3(c, r, RGB_(24, 24, 24), RGB_(110, 112, 112));
+  osd := OsdText;
   if FStatusMsg <> '' then mq := FStatusMsg
   else if FCur >= 0 then
   begin
@@ -1562,10 +1567,11 @@ begin
     FMarqueeOfs := 0;
   end;
   r := LR(103, 23, 160, 13);
+  if osd <> '' then mq := osd;     { volume / balance readout: static, marquee state kept }
   tw := LcdWidth(c, mq, MQ_H);
   LcdMetrics(c, MQ_H, th, k);
   y := r.Top + (r.Bottom - r.Top - th) div 2 + k;
-  if tw <= r.Right - r.Left then
+  if (osd <> '') or (tw <= r.Right - r.Left) then
     LcdOut(c, r, r.Left, y, mq, MQ_H, cInk)
   else
   begin
@@ -1956,6 +1962,7 @@ begin
       begin
         if (id = bSeek) and not FStream then Exit;
         FDragging := id;
+        if id in [bVol, bBal] then ShowOsd(id);
         UpdateSlider(id, X, Y);
       end;
     bTime:
@@ -2013,6 +2020,7 @@ begin
   begin
     if (FDragging = bSeek) and FStream then
       nca_seek(FSeekFrac * CurLen);
+    if FDragging in [bVol, bBal] then ShowOsd(FDragging);   { keep the readout ~1 s after release }
     FDragging := bNone;
     InvalidateAll;
     Exit;
@@ -2169,6 +2177,7 @@ begin
   begin
     if WheelDelta > 0 then FVolume := Min(100, FVolume + 4) else FVolume := Max(0, FVolume - 4);
     ApplyVolume;
+    ShowOsd(bVol);
   end;
   InvalidateAll;
 end;
@@ -2852,6 +2861,25 @@ end;
 
 { ===================== timer ===================== }
 
+{ Winamp-style value readout in the LCD title line while a slider is dragged / wheeled }
+function TMainForm.OsdText: string;
+begin
+  Result := '';
+  if not ((FDragging in [bVol, bBal]) or ((FOsdUntil <> 0) and (GetTickCount64 < FOsdUntil))) then Exit;
+  if FDragging in [bVol, bBal] then FOsdSlider := FDragging;
+  if FOsdSlider = bVol then Result := Format('Volume: %d%%', [FVolume])
+  else if FBalance = 0 then Result := 'Balance: Center'
+  else if FBalance < 0 then Result := Format('Balance: %d%% Left', [-FBalance])
+  else Result := Format('Balance: %d%% Right', [FBalance]);
+end;
+
+procedure TMainForm.ShowOsd(id: TBtnId);
+begin
+  FOsdSlider := id;
+  FOsdUntil := GetTickCount64 + 1000;
+  Invalidate;
+end;
+
 procedure TMainForm.LogEngine;
 var
   s: string;
@@ -2888,6 +2916,11 @@ var
   plDirty: Boolean;
 begin
   UpdateTrayTip;
+  if (FOsdUntil <> 0) and (FDragging = bNone) and (GetTickCount64 >= FOsdUntil) then
+  begin
+    FOsdUntil := 0;           { readout expired: back to the song title }
+    Invalidate;
+  end;
   if AudioLoaded then
   begin
     nca_poll();                         { restart a stopped device, log reroutes }

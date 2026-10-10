@@ -337,7 +337,18 @@ static void cb(ma_device *dev, void *out, const void *in, ma_uint32 frames)
     v = g_vol;
     gl = v * (g_pan > 0 ? 1.0f - g_pan : 1.0f);
     gr = v * (g_pan < 0 ? 1.0f + g_pan : 1.0f);
-    for (i = 0; i < (ma_uint32)got; i++) { o[i*2] *= gl; o[i*2+1] *= gr; }
+    {   /* de-zipper: ramp linearly from the previous gains to the new ones across this
+           buffer, so volume / balance can change on every mouse move without clicks */
+        static float curL = -1, curR = -1;
+        float dl, dr, n = (float)(got ? got : 1);
+        if (curL < 0) { curL = gl; curR = gr; }
+        dl = (gl - curL) / n; dr = (gr - curR) / n;
+        for (i = 0; i < (ma_uint32)got; i++) {
+            curL += dl; curR += dr;
+            o[i*2] *= curL; o[i*2+1] *= curR;
+        }
+        if (got) { curL = gl; curR = gr; }
+    }
     {   /* diagnostics: peak of what is actually handed to the device */
         float pk = 0, a; ma_uint32 n = frames * 2;
         for (i = 0; i < n; i++) { a = o[i] < 0 ? -o[i] : o[i]; if (a > pk) pk = a; }

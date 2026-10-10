@@ -1,5 +1,10 @@
 # Changelog
 
+## 1.7.3 - 2026-10-10
+
+- Winamp-style value readout: while the volume or balance slider is dragged (or the volume is changed with the mouse wheel), the LCD title line shows "Volume: 50%" or "Balance: Center" / "Balance: 30% Left" / "Balance: 30% Right"; the song title returns about 1 s after release.
+- Volume and balance apply in real time during the drag; the engine ramps gain changes smoothly across each audio buffer, so there are no clicks or zipper noise.
+
 ## 1.7.2 - 2026-10-10
 
 - Audio output follows the Windows default device: when a new default appears mid-playback (e.g. Bluetooth earbuds taken out of the case), when the default changes, or when the current endpoint stops or disappears, the device is reopened on the current default and playback continues at the same position. Previously playback could keep going silently to the old endpoint.
