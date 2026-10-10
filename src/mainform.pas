@@ -11,12 +11,12 @@ interface
 uses
   Windows, Messages, Classes, SysUtils, Math, Forms, Controls, Graphics,
   Dialogs, ExtCtrls, Menus, LCLType, LMessages, FileUtil, LazFileUtils, LazUTF8, IniFiles,
-  NcAudio, TagReader, TitleFont, NcTray, SingleInst;
+  NcAudio, TagReader, TitleFont, NcTray, SingleInst, FolderPick;
 
 const
   APPNAME = 'nc-amp';
   APPTITLE = 'nc-amp';
-  APPVERSION = '1.7.3';
+  APPVERSION = '1.7.4';
   MAINW = 275;
   MAINH = 116;
   TITLEH = 16;        { ONE title-bar height for both windows (logical; scaled with identical rounding) }
@@ -1258,7 +1258,7 @@ begin
     NM('Visualization', 12, FVisOn),
     NM('-', 0),
     NM('Add files...', 20),
-    NM('Add folder...', 21),
+    NM('Add folders...', 21),
     NM('-', 0),
     NM('File info / about...', 40),
     NM('Exit', 99)], False);
@@ -1280,7 +1280,7 @@ procedure TMainForm.ShowAddMenu;
 var
   id: Integer;
 begin
-  id := NativePopup(FPL.Handle, [NM('Add files...', 20), NM('Add folder (with sub-folders)...', 21)], False);
+  id := NativePopup(FPL.Handle, [NM('Add files...', 20), NM('Add folders (with sub-folders)...', 21)], False);
   DebugLog('add menu -> ' + IntToStr(id));
   case id of
     20: AddFilesDialog;
@@ -2800,23 +2800,55 @@ begin
 end;
 
 procedure TMainForm.AddDirDialog;
+const
+  DLG_TITLE = 'Add folder (including sub-folders)';
 var
   dlg: TSelectDirectoryDialog;
-  n0: Integer;
+  sl: TStringList;
+  arr: array of string;
+  i, n0, got: Integer;
+  test: string;
+  wtest: UnicodeString;
 begin
-  dlg := TSelectDirectoryDialog.Create(Self);
+  sl := TStringList.Create;
   try
-    dlg.Title := 'Add folder (including sub-folders)';
-    if dlg.Execute then
+    { NCAMP_TEST_FOLDERS=dir1|dir2|...: test hook that stands in for the dialog's result
+      array, so the multi-folder add path can be exercised without UI automation }
+    SetLength(wtest, 8192);
+    SetLength(wtest, Windows.GetEnvironmentVariableW('NCAMP_TEST_FOLDERS', PWideChar(wtest), 8192));
+    test := UTF8Encode(wtest);
+    if test <> '' then
     begin
-      n0 := FCount;
-      if (AddPaths([dlg.FileName]) > 0) and (FState = psStopped) then
-      begin
-        if FShuffle then UserPlay(n0 + Random(FCount - n0)) else UserPlay(n0);
+      sl.Delimiter := '|'; sl.StrictDelimiter := True; sl.DelimitedText := test;
+      got := sl.Count;
+    end
+    else
+      { modern multi-select folder picker (Ctrl / Shift-click several folders) }
+      got := PickFolders(Handle, DLG_TITLE, sl);
+    DebugLog(Format('add folders: picker result=%d %s', [got, StringReplace(sl.Text, LineEnding, ' | ', [rfReplaceAll])]));
+    if got < 0 then
+    begin
+      { IFileOpenDialog unavailable: old single-folder dialog }
+      sl.Clear;
+      dlg := TSelectDirectoryDialog.Create(Self);
+      try
+        dlg.Title := DLG_TITLE;
+        if dlg.Execute then sl.Add(dlg.FileName);
+      finally
+        dlg.Free;
       end;
     end;
+    if sl.Count = 0 then Exit;
+    SetLength(arr, sl.Count);
+    for i := 0 to sl.Count - 1 do arr[i] := sl[i];
+    n0 := FCount;
+    if (AddPaths(arr) > 0) and (FState = psStopped) then
+    begin
+      if FShuffle then UserPlay(n0 + Random(FCount - n0)) else UserPlay(n0);
+    end;
+    DebugLog(Format('add folders: %d folder(s) -> %d new track(s), total %d', [sl.Count, FCount - n0, FCount]));
   finally
-    dlg.Free;
+    sl.Free;
   end;
 end;
 

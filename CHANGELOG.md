@@ -1,5 +1,11 @@
 # Changelog
 
+## 1.7.4 - 2026-10-10
+
+- "Add folders" now uses the modern Windows folder picker and lets you select several folders at once (Ctrl/Shift-click); every selected folder is added recursively, with the same shuffle and auto-play behaviour as before.
+- The picker is owned by the player window, follows the system DPI, and Windows remembers the last folder used in it; the old single-folder dialog is used only as a fallback when the modern picker is unavailable.
+- Menu items renamed to "Add folders...".
+
 ## 1.7.3 - 2026-10-10
 
 - Winamp-style value readout: while the volume or balance slider is dragged (or the volume is changed with the mouse wheel), the LCD title line shows "Volume: 50%" or "Balance: Center" / "Balance: 30% Left" / "Balance: 30% Right"; the song title returns about 1 s after release.
