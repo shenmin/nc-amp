@@ -5,6 +5,7 @@
 - The audio engine is now linked directly into nc-amp.exe. Earlier versions carried it as ncaudio.dll inside the exe and unpacked it to the temp folder (%TEMP%\nc-amp_engine_...) at every start. nc-amp is now a true single-file program: it writes no DLL anywhere and loads only Windows system libraries. Start-up no longer depends on a writable temp folder, and no stale engine folders are left behind.
 - Playback, formats (MP3, FLAC, OGG Vorbis, Opus, M4A/AAC, WAV), the spectrum analyser, seeking, device switching and auto-pause, and resume work exactly as in 1.7.8. The exe is about 36 KB smaller.
 - Folders left in the temp folder by earlier versions are not used any more and can be deleted.
+- Fixed: the automatic pause on an output device change worked only the first time. Later changes, such as earbuds going back into the case and coming out again, did not pause. Windows reports one Bluetooth connect or disconnect as several device changes. Each one restarted a 10 s "same change" window, even the changes it skipped, so after the first pause later real changes were often taken as part of it. Now every real device change while playing pauses. Only the changes within 3 s of an automatic pause count as the same change (e.g. the earbuds switching from the headset to the stereo profile), and later changes do not extend that window. New test mode for NCAMP_TEST_DEVICE: repeat.
 
 ## 1.7.8 - 2026-10-10
 

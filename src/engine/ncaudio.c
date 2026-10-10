@@ -329,8 +329,8 @@ static volatile int g_needRestart = 0, g_needDescribe = 0, g_shuttingDown = 0;
 static wchar_t g_path[MAX_PATH * 4];
 static WCHAR g_openId[512];   /* default render endpoint id when the device was opened ("" = none / unknown) */
 /* auto-pause on a real output-device change (1.7.8) */
-#define NCA_SETTLE_MS 10000         /* changes closer together than this are one event (BT HFP <-> A2DP flips) */
-static ULONGLONG g_lastChange = 0;
+#define NCA_BURST_MS 3000           /* changes this soon after an auto-pause belong to it (BT HFP -> A2DP) */
+static ULONGLONG g_lastAutoPause = 0;  /* when the last auto-pause happened; only a new auto-pause moves it */
 static volatile int g_autoPaused = 0;
 static char g_autoWhy[600];
 /* NCAMP_TEST_DEVICE hooks: simulated default endpoint (g_testDefOn), forced device rate, no device until */
@@ -846,21 +846,29 @@ static void nca_remember_endpoint(void)
      decoder rebuild for a new rate) only bring back the device the listener is already using;
    - no endpoint before ("" - nothing open yet, e.g. no device at start-up while auto-resuming):
      nothing was taken away from the listener.
-   Changes closer together than NCA_SETTLE_MS (Bluetooth connect: HFP -> A2DP, default switching
-   twice, ...) are one event: only the first can pause, so a Play pressed while things settle is
-   not undone and playback continues on the final default device. */
+   Every real change while playing pauses - the first one, the tenth one, however close together
+   they come. The only exception is a burst: Windows reports one Bluetooth connect / disconnect as
+   several changes (HFP -> A2DP endpoint, default switching twice, ...), so changes within
+   NCA_BURST_MS of the last auto-pause belong to that pause and do not pause again (a Play pressed
+   meanwhile is not undone). The burst is measured from the pause itself and is not extended by
+   later changes: 2.0.0 and earlier used a 10 s window restarted by every change, including the
+   ones it skipped, so after the first pause the follow-up notifications of each connect kept the
+   window open and later real changes were taken as "part of the same change" and never paused. */
 static void nca_endpoint_check(const WCHAR *oldId, const WCHAR *newId, const char *why)
 {
-    ULONGLONG now = GetTickCount64(); int burst, paused = 0;
+    ULONGLONG now = GetTickCount64(); int paused = 0;
     const WCHAR *nw = newId[0] ? newId : L"(none)";
     if (!oldId[0] || wcscmp(oldId, newId) == 0) return;
-    burst = g_lastChange && now - g_lastChange < NCA_SETTLE_MS;
-    g_lastChange = now;
-    if (burst) { nca_log("device change %ls -> %ls (%s): part of the same change, no pause", oldId, nw, why); return; }
+    if (g_lastAutoPause && now - g_lastAutoPause < NCA_BURST_MS) {
+        nca_log("device change %ls -> %ls (%s): %.1f s after the auto-pause, same change, no pause", oldId, nw, why,
+                (double)(now - g_lastAutoPause) / 1000.0);
+        return;
+    }
     ma_mutex_lock(&g_lock);
     if (g_dec && g_state == NCA_PLAYING) { g_state = NCA_PAUSED; paused = 1; }
     ma_mutex_unlock(&g_lock);
     if (paused) {
+        g_lastAutoPause = now;
         snprintf(g_autoWhy, sizeof g_autoWhy, "output device changed (%s): %ls -> %ls", why, oldId, nw);
         g_autoPaused = 1;
         nca_log("auto-pause: %s", g_autoWhy);
@@ -926,9 +934,11 @@ static void nca_reopen(const char *why)
 
 /* NCAMP_TEST_DEVICE=<mode>: simulated device events (Wine has no real endpoints). Times are from
    the first nca_poll. Real changes (should auto-pause once): reopen (+5 s a default appears from
-   nothing - no pause, +10 s it switches - pause), change (+5 s speakers -> earbuds-hfp, +9 s ->
+   nothing - no pause, +10 s it switches - pause), change (+5 s speakers -> earbuds-hfp, +6.5 s ->
    earbuds-a2dp), remove (+5 s earbuds unplugged, no device for 4 s, then speakers), reroute (+5 s
-   miniaudio reroutes to new earbuds). Not changes (no pause): stop (device stops, same endpoint),
+   miniaudio reroutes to new earbuds), repeat (8 changes over 54 s: earbuds out / in again and again,
+   via default switch, miniaudio reroute and unplug, with HFP -> A2DP follow-ups 1.5 s later; press
+   Play after each pause - every change except the follow-ups pauses). Not changes (no pause): stop (device stops, same endpoint),
    stuck (callback watchdog), rate (same endpoint comes back at 44.1 kHz: decoder rebuild),
    nodev (no device for the first 6 s at start-up). */
 static void nca_test_init(void)
@@ -937,7 +947,7 @@ static void nca_test_init(void)
     if (g_testMode >= 0) return;
     GetEnvironmentVariableA("NCAMP_TEST_DEVICE", v, sizeof v);
     g_testMode = !strcmp(v, "stop") ? 1 : !strcmp(v, "reopen") ? 2 : !strcmp(v, "nodev") ? 4 : !strcmp(v, "change") ? 5 :
-                 !strcmp(v, "remove") ? 6 : !strcmp(v, "stuck") ? 7 : !strcmp(v, "rate") ? 8 : !strcmp(v, "reroute") ? 9 : 0;
+                 !strcmp(v, "remove") ? 6 : !strcmp(v, "stuck") ? 7 : !strcmp(v, "rate") ? 8 : !strcmp(v, "reroute") ? 9 : !strcmp(v, "repeat") ? 10 : 0;
     if (g_testMode == 4) g_testNoDevUntil = GetTickCount64() + 6000;
     if (g_testMode == 1 || g_testMode >= 5) { g_testDefOn = 1; wcscpy(g_testDef, g_testMode == 6 ? L"{TEST}.{earbuds}" : L"{TEST}.{speakers}"); }
 }
@@ -948,6 +958,26 @@ static void nca_test_step(ULONGLONG t, int *step)
 {
     int m = g_testMode;
     if (m <= 0 || m == 4) return;
+    if (m == 10) {  /* repeat: real changes again and again, Play pressed after each pause (by the tester) */
+        static const struct { unsigned ms; int kind; const WCHAR *id; const char *what; } ev[] = {
+            {  5000, 0, L"{TEST}.{earbuds-hfp}",  "earbuds out of the case (HFP): speakers -> earbuds" },
+            {  6500, 0, L"{TEST}.{earbuds-a2dp}", "earbuds switch HFP -> A2DP (1.5 s later, same change)" },
+            { 22000, 1, L"{TEST}.{speakers}",     "earbuds back in the case: miniaudio reroutes to the speakers" },
+            { 38000, 0, L"{TEST}.{earbuds-hfp}",  "earbuds out again (HFP): speakers -> earbuds" },
+            { 39500, 0, L"{TEST}.{earbuds-a2dp}", "earbuds switch HFP -> A2DP (1.5 s later, same change)" },
+            { 46000, 2, L"",                      "earbuds back in the case: endpoint gone, no device for 1.5 s" },
+            { 47500, 0, L"{TEST}.{speakers}",     "speakers become the default" },
+            { 54000, 0, L"{TEST}.{earbuds-a2dp}", "earbuds out again: speakers -> earbuds" },
+        };
+        while (*step < (int)(sizeof ev / sizeof ev[0]) && t >= ev[*step].ms) {
+            int k = (*step)++;
+            nca_log("TEST: %s", ev[k].what);
+            nca_test_set(ev[k].id);
+            if (ev[k].kind == 1) g_needDescribe = 1;
+            if (ev[k].kind == 2) { g_testNoDevUntil = GetTickCount64() + 1500; ma_device_stop(&g_dev); }
+        }
+        return;
+    }
     if (*step == 0 && t >= 5000) {
         (*step)++;
         if (m == 1) { nca_log("TEST: simulating device stop"); ma_device_stop(&g_dev); }
@@ -958,7 +988,7 @@ static void nca_test_step(ULONGLONG t, int *step)
         if (m == 8) { nca_log("TEST: same device comes back at 44100 Hz"); g_testRate = 44100; g_needRestart = 1; }
         if (m == 9) { nca_log("TEST: miniaudio reroutes to new earbuds"); nca_test_set(L"{TEST}.{earbuds}"); g_needDescribe = 1; }
     }
-    if (*step == 1 && t >= 9000 && (m == 5 || m == 6)) {
+    if (*step == 1 && t >= (m == 5 ? 6500u : 9000u) && (m == 5 || m == 6)) {
         (*step)++;
         if (m == 5) { nca_log("TEST: earbuds switch HFP -> A2DP endpoint"); nca_test_set(L"{TEST}.{earbuds-a2dp}"); }
         if (m == 6) { nca_log("TEST: speakers become the default"); nca_test_set(L"{TEST}.{speakers}"); }
