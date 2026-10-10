@@ -16,7 +16,7 @@ uses
 const
   APPNAME = 'nc-amp';
   APPTITLE = 'nc-amp';
-  APPVERSION = '1.7.1';
+  APPVERSION = '1.7.2';
   MAINW = 275;
   MAINH = 116;
   TITLEH = 16;        { ONE title-bar height for both windows (logical; scaled with identical rounding) }
@@ -81,6 +81,7 @@ type
     FSeekFrac: Double;
     FListTop, FFocus, FAnchor, FScanPos: Integer;
     FBitrate, FFreq, FChans, FFailStreak: Integer;
+    FDiagTick: QWord;   { last audio-output diagnostics log }
     FShowRemaining: Boolean;
     FStatusMsg: string;
     FDpiMain, FDpiPL: Integer;
@@ -101,6 +102,8 @@ type
     FMoveDocked: Boolean;
     FResizeStartY, FResizeStartRows: Integer;
     procedure TimerTick(Sender: TObject);
+    procedure LogEngine;
+    procedure DiagOutput;
     procedure BuildMenus;
   private
     { no taskbar button: notification-area icon instead }
@@ -880,10 +883,13 @@ begin
   FScaleMain := 1; FScalePL := 1;
   Left := -32000;   { real position is set in FormShow, once the DPI is known }
 
-  if not (LoadAudio and AudioReady) then
+  { a missing output device is not fatal: the engine keeps retrying and follows the
+    default endpoint (see nca_poll) }
+  if not LoadAudio then
     FStatusMsg := 'AUDIO ENGINE ERROR: ' + AudioError;
   DebugLog('audio engine loaded=' + BoolToStr(AudioLoaded, True) + ' device=' + BoolToStr(AudioReady, True) +
     ' ' + AudioVersion + ' ' + AudioError);
+  LogEngine;
 
   FPL := TPlaylistForm.CreatePL(Self);
   BuildMenus;
@@ -2846,6 +2852,32 @@ end;
 
 { ===================== timer ===================== }
 
+procedure TMainForm.LogEngine;
+var
+  s: string;
+  p: Integer;
+begin
+  s := AudioTakeLog;
+  while s <> '' do
+  begin
+    p := Pos(#10, s);
+    if p = 0 then p := Length(s) + 1;
+    if p > 1 then DebugLog('engine: ' + Copy(s, 1, p - 1));
+    Delete(s, 1, p);
+  end;
+end;
+
+procedure TMainForm.DiagOutput;
+var
+  cbs, frames: Integer;
+  pk: Single;
+begin
+  pk := nca_take_peak(@cbs, @frames);
+  if GetEnvironmentVariable('NCAMP_LOG') = '' then Exit;
+  DebugLog(Format('output: peak=%.4f (%.1f dBFS) callbacks=%d frames=%d state=%d pos=%.2f vol=%d bal=%d',
+    [pk, 20 * Log10(Max(pk, 1e-9)), cbs, frames, nca_state(), nca_get_pos(), FVolume, FBalance]));
+end;
+
 procedure TMainForm.TimerTick(Sender: TObject);
 var
   fft: array[0..511] of Single;
@@ -2856,6 +2888,16 @@ var
   plDirty: Boolean;
 begin
   UpdateTrayTip;
+  if AudioLoaded then
+  begin
+    nca_poll();                         { restart a stopped device, log reroutes }
+    if GetTickCount64 - FDiagTick >= 3000 then
+    begin
+      FDiagTick := GetTickCount64;
+      DiagOutput;
+    end;
+    LogEngine;
+  end;
   if AudioLoaded and (FState = psPlaying) and FStream then
     if nca_state() = NCA_ENDED then
     begin

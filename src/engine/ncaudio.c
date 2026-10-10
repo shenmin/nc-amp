@@ -14,10 +14,12 @@
 #include <mfidl.h>
 #include <mfreadwrite.h>
 #include <mferror.h>
+#include <mmdeviceapi.h>
 #include <math.h>
 #include <string.h>
 #include <stdlib.h>
 #include <stdio.h>
+#include <stdarg.h>
 #include <wchar.h>
 #include <wctype.h>
 
@@ -309,6 +311,12 @@ static volatile float g_vol = 1.0f, g_pan = 0.0f;
 static float g_ring[RING]; static volatile LONG g_ringPos = 0;
 static char g_err[256] = "";
 static ma_decoding_backend_vtable *g_backends[3];
+static volatile float g_peakOut = 0; static volatile LONG g_cbCount = 0, g_cbFrames = 0, g_cbTotal = 0;
+static volatile int g_reopening = 0, g_devInited = 0, g_pollEnabled = 0;
+static volatile int g_needRestart = 0, g_needDescribe = 0, g_shuttingDown = 0;
+static wchar_t g_path[MAX_PATH * 4];
+static WCHAR g_openId[512];   /* default render endpoint id when the device was opened */
+static char g_log[16384]; static CRITICAL_SECTION g_logCs; static int g_logCsOk = 0;
 
 static void cb(ma_device *dev, void *out, const void *in, ma_uint32 frames)
 {
@@ -330,6 +338,75 @@ static void cb(ma_device *dev, void *out, const void *in, ma_uint32 frames)
     gl = v * (g_pan > 0 ? 1.0f - g_pan : 1.0f);
     gr = v * (g_pan < 0 ? 1.0f + g_pan : 1.0f);
     for (i = 0; i < (ma_uint32)got; i++) { o[i*2] *= gl; o[i*2+1] *= gr; }
+    {   /* diagnostics: peak of what is actually handed to the device */
+        float pk = 0, a; ma_uint32 n = frames * 2;
+        for (i = 0; i < n; i++) { a = o[i] < 0 ? -o[i] : o[i]; if (a > pk) pk = a; }
+        if (pk > g_peakOut) g_peakOut = pk;
+        g_cbCount++; g_cbFrames += frames; g_cbTotal++;
+    }
+}
+
+static void nca_log(const char *fmt, ...)
+{
+    char line[512]; va_list ap; size_t n;
+    if (!g_logCsOk) { InitializeCriticalSection(&g_logCs); g_logCsOk = 1; }
+    va_start(ap, fmt); vsnprintf(line, sizeof line, fmt, ap); va_end(ap);
+    EnterCriticalSection(&g_logCs);
+    n = strlen(g_log);
+    if (n + strlen(line) + 2 < sizeof g_log) { strcat(g_log, line); strcat(g_log, "\n"); }
+    LeaveCriticalSection(&g_logCs);
+}
+
+/* returns (and clears) the engine's pending log lines */
+NCA_API int nca_take_log(char *buf, int cap)
+{
+    int n;
+    if (!buf || cap <= 0) return 0;
+    EnterCriticalSection(&g_logCs);
+    n = (int)strlen(g_log); if (n >= cap) n = cap - 1;
+    memcpy(buf, g_log, (size_t)n); buf[n] = 0; g_log[0] = 0;
+    LeaveCriticalSection(&g_logCs);
+    return n;
+}
+
+/* peak (0..1+) of the samples written to the device since the last call, callback count */
+NCA_API float nca_take_peak(int *callbacks, int *frames)
+{
+    float p = g_peakOut; g_peakOut = 0;
+    if (callbacks) *callbacks = (int)g_cbCount;
+    if (frames) *frames = (int)g_cbFrames;
+    g_cbCount = 0; g_cbFrames = 0;
+    return p;
+}
+
+static void nca_notify(const ma_device_notification *n)
+{
+    static const char *names[] = { "started", "stopped", "rerouted", "interruption_began", "interruption_ended", "unlocked" };
+    int t = (int)n->type;
+    nca_log("device notification: %s", (t >= 0 && t < 6) ? names[t] : "?");
+    if (g_reopening || g_shuttingDown) return;
+    if (n->type == ma_device_notification_type_stopped) g_needRestart = 1;
+    if (n->type == ma_device_notification_type_rerouted) g_needDescribe = 1;
+    if (n->type == ma_device_notification_type_interruption_ended || n->type == ma_device_notification_type_unlocked) g_needRestart = 1;
+}
+
+static void nca_describe(void)
+{
+    ma_device_info *pb = NULL; ma_uint32 npb = 0, i;
+    nca_log("backend=%s", ma_get_backend_name(g_dev.pContext->backend));
+    nca_log("device='%s' state=%d", g_dev.playback.name, (int)ma_device_get_state(&g_dev));
+    nca_log("client: %s %uch %uHz | device(internal): %s %uch %uHz period=%u frames x %u, shareMode=%s",
+        ma_get_format_name(g_dev.playback.format), g_dev.playback.channels, g_dev.sampleRate,
+        ma_get_format_name(g_dev.playback.internalFormat), g_dev.playback.internalChannels, g_dev.playback.internalSampleRate,
+        g_dev.playback.internalPeriodSizeInFrames, g_dev.playback.internalPeriods,
+        g_dev.playback.shareMode == ma_share_mode_exclusive ? "exclusive" : "shared");
+    {
+        char cm[256]; ma_channel_map_to_string(g_dev.playback.internalChannelMap, g_dev.playback.internalChannels, cm, sizeof cm);
+        nca_log("device channel map: %s", cm);
+    }
+    if (ma_context_get_devices(g_dev.pContext, &pb, &npb, NULL, NULL) == MA_SUCCESS)
+        for (i = 0; i < npb; i++) nca_log("  playback endpoint %u: '%s'%s", i, pb[i].name, pb[i].isDefault ? " [default]" : "");
+    { float mv = -1; ma_device_get_master_volume(&g_dev, &mv); nca_log("volume=%.3f pan=%.3f masterVolume=%.3f", g_vol, g_pan, mv); }
 }
 
 NCA_API const char *nca_version(void) { return "miniaudio " MA_VERSION_STRING ", stb_vorbis 1.22, opusfile 0.12 / libopus 1.5.2, Media Foundation (AAC)"; }
@@ -337,26 +414,49 @@ NCA_API const char *nca_error(void) { return g_err; }
 
 static void nca_setup(void)
 {
+    if (!g_logCsOk) { InitializeCriticalSection(&g_logCs); g_logCsOk = 1; }
     if (!g_lockOk) { ma_mutex_init(&g_lock); g_lockOk = 1; }
     g_backends[0] = &g_nca_vb_backend;
     g_backends[1] = ma_decoding_backend_libopus;
     g_backends[2] = &g_nca_mf_backend;
 }
 
-NCA_API int nca_init(void)
+/* open + start the playback device on the *current default* endpoint (pDeviceID = NULL,
+   WASAPI first, automatic stream routing left on) */
+static int nca_device_open(void)
 {
-    ma_device_config dc;
-    nca_setup();
-    if (g_devOk) return 1;
-    dc = ma_device_config_init(ma_device_type_playback);
+    ma_device_config dc = ma_device_config_init(ma_device_type_playback);
+    ma_result r;
+    {   /* NCAMP_TEST_DEVICE=nodev: pretend no output device exists for the first 6 s */
+        static ULONGLONG until = 0; char v[16] = "";
+        if (!until) { GetEnvironmentVariableA("NCAMP_TEST_DEVICE", v, sizeof v); until = strcmp(v, "nodev") == 0 ? GetTickCount64() + 6000 : 1; }
+        if (GetTickCount64() < until) { snprintf(g_err, sizeof g_err, "no audio output device (TEST)"); nca_log("%s", g_err); return 0; }
+    }
     dc.playback.format = ma_format_f32;
     dc.playback.channels = 2;
     dc.sampleRate = 0;                  /* device native rate */
     dc.dataCallback = cb;
+    dc.notificationCallback = nca_notify;
     dc.performanceProfile = ma_performance_profile_conservative;
-    if (ma_device_init(NULL, &dc, &g_dev) != MA_SUCCESS) { strcpy(g_err, "no audio output device"); return 0; }
-    if (ma_device_start(&g_dev) != MA_SUCCESS) { ma_device_uninit(&g_dev); strcpy(g_err, "cannot start audio device"); return 0; }
-    g_devOk = 1;
+    dc.wasapi.noAutoStreamRouting = MA_FALSE;
+    r = ma_device_init(NULL, &dc, &g_dev);
+    if (r != MA_SUCCESS) { snprintf(g_err, sizeof g_err, "no audio output device (%s)", ma_result_description(r)); nca_log("%s", g_err); return 0; }
+    r = ma_device_start(&g_dev);
+    if (r != MA_SUCCESS) { ma_device_uninit(&g_dev); snprintf(g_err, sizeof g_err, "cannot start audio device (%s)", ma_result_description(r)); nca_log("%s", g_err); return 0; }
+    return 1;
+}
+
+static void nca_remember_endpoint(void);
+
+NCA_API int nca_init(void)
+{
+    nca_setup();
+    if (g_devOk) return 1;
+    g_pollEnabled = 1;                  /* even without a device: nca_poll keeps retrying */
+    if (!nca_device_open()) return 0;
+    g_devInited = 1; g_devOk = 1;
+    nca_remember_endpoint();
+    nca_describe();
     return 1;
 }
 
@@ -504,6 +604,7 @@ NCA_API int nca_open(const wchar_t *path, nca_info *info)
     if (info) nca_fill_info(d, path, info);
     ma_mutex_lock(&g_lock);
     old = g_dec; g_dec = d; g_state = NCA_STOPPED;
+    wcsncpy(g_path, path, MAX_PATH * 4 - 1); g_path[MAX_PATH * 4 - 1] = 0;
     ma_mutex_unlock(&g_lock);
     if (old) { ma_decoder_uninit(old); free(old); }
     return 1;
@@ -564,8 +665,8 @@ NCA_API int nca_seek(double sec)
     return ok;
 }
 
-NCA_API void nca_set_volume(float v) { g_vol = v < 0 ? 0 : (v > 1 ? 1 : v); }
-NCA_API void nca_set_pan(float p)    { g_pan = p < -1 ? -1 : (p > 1 ? 1 : p); }
+NCA_API void nca_set_volume(float v) { g_vol = v < 0 ? 0 : (v > 1 ? 1 : v); nca_log("set_volume(%.3f) -> %.3f", v, g_vol); }
+NCA_API void nca_set_pan(float p)    { g_pan = p < -1 ? -1 : (p > 1 ? 1 : p); nca_log("set_pan(%.3f) -> %.3f", p, g_pan); }
 
 /* 512 magnitude bins of a 1024-point Hann-windowed FFT of the most recent output
    (same layout as classic "FFT1024" visualisation data). 1 = ok */
@@ -615,7 +716,118 @@ NCA_API int nca_probe(const wchar_t *path, nca_info *info)
 
 NCA_API void nca_uninit(void)
 {
+    g_shuttingDown = 1;
     nca_close();
-    if (g_devOk) { ma_device_uninit(&g_dev); g_devOk = 0; }
+    if (g_devInited) { ma_device_uninit(&g_dev); g_devInited = 0; } g_devOk = 0;
     if (g_mfStarted) { pMFShutdown(); g_mfStarted = 0; }
+}
+
+/* ------------------------------------------------------------------ */
+/* device robustness: follow the default endpoint, recover stopped /   */
+/* invalidated / silent-stuck devices                                 */
+/* ------------------------------------------------------------------ */
+static const GUID nca_CLSID_MMDeviceEnumerator = {0xBCDE0395, 0xE52F, 0x467C, {0x8E, 0x3D, 0xC4, 0x57, 0x92, 0x91, 0x69, 0x2E}};
+static const GUID nca_IID_IMMDeviceEnumerator  = {0xA95664D2, 0x9614, 0x4F35, {0xA7, 0x46, 0xDE, 0x8D, 0xB6, 0x36, 0x17, 0xE6}};
+
+/* id + state of the current default render (console) endpoint; 0 = unavailable */
+static int g_testFakeDefault = 0;   /* NCAMP_TEST_DEVICE=reopen: simulated endpoints */
+static int nca_default_endpoint(WCHAR *id, int cap, DWORD *state)
+{
+    IMMDeviceEnumerator *e = NULL; IMMDevice *d = NULL; LPWSTR s = NULL; int ok = 0;
+    HRESULT ci;
+    if (g_testFakeDefault) {
+        _snwprintf(id, cap, L"{TEST}.{earbuds-%d}", g_testFakeDefault);
+        if (state) *state = DEVICE_STATE_ACTIVE;
+        return 1;
+    }
+    ci = CoInitializeEx(NULL, COINIT_APARTMENTTHREADED);
+    if (SUCCEEDED(CoCreateInstance(&nca_CLSID_MMDeviceEnumerator, NULL, CLSCTX_ALL, &nca_IID_IMMDeviceEnumerator, (void**)&e))) {
+        if (SUCCEEDED(IMMDeviceEnumerator_GetDefaultAudioEndpoint(e, eRender, eConsole, &d))) {
+            if (SUCCEEDED(IMMDevice_GetId(d, &s))) { wcsncpy(id, s, cap - 1); id[cap - 1] = 0; CoTaskMemFree(s); ok = 1; }
+            if (state && FAILED(IMMDevice_GetState(d, state))) *state = 0;
+            IMMDevice_Release(d);
+        }
+        IMMDeviceEnumerator_Release(e);
+    }
+    if (ci == S_OK || ci == S_FALSE) CoUninitialize();
+    return ok;
+}
+
+static void nca_remember_endpoint(void)
+{
+    DWORD st = 0;
+    g_openId[0] = 0;
+    if (nca_default_endpoint(g_openId, 512, &st)) nca_log("default endpoint id=%ls state=%lu", g_openId, st);
+    else nca_log("default endpoint id: unavailable (backend %s)", ma_get_backend_name(g_dev.pContext->backend));
+}
+
+/* tear the device down and open it again on the current default endpoint, keeping the
+   track, its position and the play state */
+static void nca_reopen(const char *why)
+{
+    nca_log("reopening audio device: %s", why);
+    g_reopening = 1;
+    if (g_devInited) { ma_device_uninit(&g_dev); g_devInited = 0; }
+    g_devOk = 0;
+    if (!nca_device_open()) { g_reopening = 0; nca_log("reopen failed, will retry in 2 s"); return; }
+    g_devInited = 1; g_devOk = 1;
+    g_reopening = 0;
+    nca_remember_endpoint();
+    if (g_dec && g_path[0] && g_dec->outputSampleRate != g_dev.sampleRate) {
+        /* the decoder resamples to the device rate: rebuild it at the new rate, same position */
+        ma_decoder *d = (ma_decoder*)malloc(sizeof(ma_decoder)), *old; ma_decoder_config cfg = nca_cfg(1);
+        double posSec = 0; ma_uint64 c = 0; int st;
+        ma_mutex_lock(&g_lock);
+        if (ma_decoder_get_cursor_in_pcm_frames(g_dec, &c) == MA_SUCCESS && g_dec->outputSampleRate) posSec = (double)c / g_dec->outputSampleRate;
+        st = g_state;
+        ma_mutex_unlock(&g_lock);
+        if (d && ma_decoder_init_file_w(g_path, &cfg, d) == MA_SUCCESS) {
+            ma_decoder_seek_to_pcm_frame(d, (ma_uint64)(posSec * g_dev.sampleRate));
+            ma_mutex_lock(&g_lock); old = g_dec; g_dec = d; g_state = st; ma_mutex_unlock(&g_lock);
+            if (old) { ma_decoder_uninit(old); free(old); }
+            nca_log("decoder rebuilt for %u Hz, resumed at %.2f s", g_dev.sampleRate, posSec);
+        } else free(d);
+    }
+    nca_describe();
+}
+
+/* Called from the UI thread several times a second. */
+NCA_API void nca_poll(void)
+{
+    static ULONGLONG lastCheck = 0, testAt = 0; static LONG lastCb = 0; static int testMode = -1;
+    ULONGLONG now = GetTickCount64();
+    if (testMode < 0) {          /* NCAMP_TEST_DEVICE=stop|reopen: simulate a lost device after 5 s */
+        char v[16] = ""; GetEnvironmentVariableA("NCAMP_TEST_DEVICE", v, sizeof v);
+        testMode = strcmp(v, "stop") == 0 ? 1 : strcmp(v, "reopen") == 0 ? 2 : 0;
+        testAt = now + 5000;
+    }
+    if (g_shuttingDown || !g_pollEnabled) return;
+    if (!g_devOk) {              /* a reopen failed earlier: retry every 2 s */
+        if (now - lastCheck >= 2000) { lastCheck = now; nca_reopen("retry"); }
+        return;
+    }
+    if (testMode == 1 && now >= testAt) { nca_log("TEST: simulating device stop"); ma_device_stop(&g_dev); testMode = 0; }
+    if (testMode == 2 && now >= testAt) { nca_log("TEST: earbuds connected, become the default endpoint"); g_testFakeDefault = 1; testMode = 3; testAt = now + 5000; }
+    if (testMode == 3 && now >= testAt) { nca_log("TEST: default endpoint switched again"); g_testFakeDefault = 2; testMode = 0; }
+    if (g_needDescribe) { g_needDescribe = 0; nca_log("rerouted by miniaudio"); nca_remember_endpoint(); nca_describe(); }
+    if (g_needRestart) { g_needRestart = 0; nca_reopen("device stopped / interrupted"); lastCheck = now; return; }
+    if (now - lastCheck < 2000) return;
+    lastCheck = now;
+    if (ma_device_get_state(&g_dev) != ma_device_state_started) { nca_reopen("device not running"); return; }
+    {
+        WCHAR id[512]; DWORD st = 0;
+        if (!g_openId[0] && nca_default_endpoint(id, 512, &st) && st == DEVICE_STATE_ACTIVE) {
+            /* opened without a real endpoint (e.g. null backend) and one has appeared */
+            nca_log("default endpoint appeared: %ls", id); nca_reopen("default endpoint appeared"); return;
+        }
+        if (g_openId[0] && nca_default_endpoint(id, 512, &st)) {
+            if (wcscmp(id, g_openId) != 0) { nca_log("default endpoint changed: %ls -> %ls", g_openId, id); nca_reopen("default endpoint changed"); return; }
+            if (st != DEVICE_STATE_ACTIVE) { nca_log("default endpoint state=%lu", st); }
+        }
+    }
+    {   /* callbacks stalled although the device claims to run (stuck stream) */
+        LONG cbs = g_cbTotal;
+        if (cbs == lastCb) { nca_reopen("no audio callbacks for 2 s"); lastCb = g_cbTotal; return; }
+        lastCb = cbs;
+    }
 }

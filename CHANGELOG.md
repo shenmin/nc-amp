@@ -1,5 +1,11 @@
 # Changelog
 
+## 1.7.2 - 2026-10-10
+
+- Audio output follows the Windows default device: when a new default appears mid-playback (e.g. Bluetooth earbuds taken out of the case), when the default changes, or when the current endpoint stops or disappears, the device is reopened on the current default and playback continues at the same position. Previously playback could keep going silently to the old endpoint.
+- If no output device exists at start-up, nc-amp keeps retrying every 2 s instead of staying silent until restarted; a stuck stream (no audio callbacks for 2 s) is also recovered.
+- Detailed audio diagnostics in the `NCAMP_LOG` log: backend, endpoint name and id, all playback endpoints, client and device format / channels / sample rate / period, device notifications, reopen events, and every 3 s the peak level actually written to the device.
+
 ## 1.7.1 - 2026-10-10
 
 - Bitrate readout shows the real average kbps as a plain number up to 4 digits (e.g. 953 for FLAC, 1411 for WAV) instead of abbreviating values above 999 as "1M".

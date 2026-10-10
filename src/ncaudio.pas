@@ -41,6 +41,10 @@ var
   nca_probe: function(path: PWideChar; info: PNcaInfo): Integer; cdecl;
   nca_version: function: PAnsiChar; cdecl;
   nca_error: function: PAnsiChar; cdecl;
+  { diagnostics (1.7.2+) }
+  nca_take_log: function(buf: PAnsiChar; cap: Integer): Integer; cdecl;
+  nca_take_peak: function(callbacks, frames: PInteger): Single; cdecl;
+  nca_poll: procedure; cdecl;
 
   AudioLoaded: Boolean = False;     { DLL loaded and functions resolved }
   AudioReady: Boolean = False;      { output device running }
@@ -49,6 +53,8 @@ var
 function LoadAudio: Boolean;
 procedure UnloadAudio;
 function AudioVersion: string;
+{ engine log lines since the last call (empty string if none) }
+function AudioTakeLog: string;
 
 implementation
 
@@ -163,6 +169,9 @@ begin
     Pointer(nca_probe) := GP('nca_probe');
     Pointer(nca_version) := GP('nca_version');
     Pointer(nca_error) := GP('nca_error');
+    Pointer(nca_take_log) := GP('nca_take_log');
+    Pointer(nca_take_peak) := GP('nca_take_peak');
+    Pointer(nca_poll) := GP('nca_poll');
   except
     on E: Exception do
     begin
@@ -183,6 +192,17 @@ begin
   AudioLoaded := False;
   AudioReady := False;
   { the DLL stays mapped until exit: the audio thread is already gone }
+end;
+
+function AudioTakeLog: string;
+var
+  buf: array[0..16383] of AnsiChar;
+  n: Integer;
+begin
+  Result := '';
+  if not AudioLoaded then Exit;
+  n := nca_take_log(@buf[0], SizeOf(buf));
+  if n > 0 then SetString(Result, PAnsiChar(@buf[0]), n);
 end;
 
 function AudioVersion: string;
