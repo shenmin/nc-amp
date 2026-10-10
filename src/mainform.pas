@@ -16,7 +16,7 @@ uses
 const
   APPNAME = 'nc-amp';
   APPTITLE = 'nc-amp';
-  APPVERSION = '1.7.6';
+  APPVERSION = '1.7.7';
   MAINW = 275;
   MAINH = 116;
   TITLEH = 16;        { ONE title-bar height for both windows (logical; scaled with identical rounding) }
@@ -82,6 +82,7 @@ type
     FListTop, FFocus, FAnchor, FScanPos: Integer;
     FBitrate, FFreq, FChans, FFailStreak: Integer;
     FDiagTick: QWord;   { last audio-output diagnostics log }
+    FEndSince: QWord;   { playing but sitting at the end without the engine reporting it (0 = no) }
     FOsdSlider: TBtnId; { bVol / bBal: value readout shown in the LCD title line }
     FOsdUntil: QWord;   { readout stays until this tick after release / wheel }
     FShowRemaining: Boolean;
@@ -1531,7 +1532,7 @@ begin
     len := CurLen;
     if FStream and (len > 0) then
     begin
-      if FDragging = bSeek then frac := FSeekFrac else frac := Min(1, CurPos / len);
+      if FDragging = bSeek then frac := FSeekFrac else frac := EnsureRange(CurPos / len, 0, 1);
       x := Round((SH_SEEK_X + (SH_SEEK_W - 8) * frac) * G);
       ChromeThumb(c, Rect(x, P(TB_MAIN_CY - 3.5), x + P(8), P(TB_MAIN_CY + 3.5)), FDragging = bSeek);
     end;
@@ -1683,7 +1684,7 @@ begin
   len := CurLen;
   if FStream and (len > 0) then
   begin
-    if FDragging = bSeek then frac := FSeekFrac else frac := Min(1, CurPos / len);
+    if FDragging = bSeek then frac := FSeekFrac else frac := EnsureRange(CurPos / len, 0, 1);
     x := Round((12 + 226 * frac) * G);
     ChromeThumb(c, Rect(x, P(71.5), x + P(28), P(80)), FDragging = bSeek);
   end;
@@ -2328,18 +2329,31 @@ begin
   else if i >= FListTop + VisibleRows then FListTop := i - VisibleRows + 1;
 end;
 
+{ never beyond the length: the time readout and the seek thumb stay inside the track }
 function TMainForm.CurPos: Double;
+var
+  len: Double;
 begin
   Result := 0;
   if AudioLoaded and FStream then
-    Result := nca_get_pos();
+  begin
+    Result := Max(0, nca_get_pos());
+    len := CurLen;
+    if (len > 0) and (Result > len) then Result := len;
+  end;
 end;
 
+{ the engine's length (measured once when the track was opened); if it could not tell,
+  the duration the playlist scan found }
 function TMainForm.CurLen: Double;
 begin
   Result := 0;
   if AudioLoaded and FStream then
+  begin
     Result := nca_get_len();
+    if (Result <= 0) and (FCur >= 0) and (FCur < FCount) and (FTracks[FCur].Duration > 0) then
+      Result := FTracks[FCur].Duration;
+  end;
 end;
 
 { ===================== tray icon (no taskbar button) ===================== }
@@ -2763,10 +2777,14 @@ begin
       else
       begin
         FOrderPos := FCount - 1;
+        DebugLog('advance: end of the order, stopping');
         StopPlay;
         Exit;
       end;
     end;
+    DebugLog(Format('advance (%s): #%d -> #%d "%s" (order %d/%d)',
+      [BoolToStr(Auto, 'auto', 'manual'), FCur + 1, FOrder[FOrderPos] + 1,
+       DisplayTitle(FOrder[FOrderPos]), FOrderPos + 1, FCount]));
     PlayIndex(FOrder[FOrderPos]);
   end
   else
@@ -2777,10 +2795,13 @@ begin
       if FRepeat or not Auto then i := 0
       else
       begin
+        DebugLog('advance: end of the playlist, stopping');
         StopPlay;
         Exit;
       end;
     end;
+    DebugLog(Format('advance (%s): #%d -> #%d "%s"',
+      [BoolToStr(Auto, 'auto', 'manual'), FCur + 1, i + 1, DisplayTitle(i)]));
     PlayIndex(i);
   end;
 end;
@@ -3083,7 +3104,8 @@ var
   i, j, lo, hi, n: Integer;
   peak, v: Single;
   title: string;
-  dur: Double;
+  dur, rawPos: Double;
+  st: Integer;
   plDirty: Boolean;
 begin
   UpdateTrayTip;
@@ -3104,11 +3126,32 @@ begin
     LogEngine;
   end;
   if AudioLoaded and (FState = psPlaying) and FStream then
-    if nca_state() = NCA_ENDED then
+  begin
+    { the track is over when the engine says so - or, as a safety net, when the position
+      has reached the length and stays there, or the engine stopped on its own }
+    title := '';
+    st := nca_state();
+    rawPos := nca_get_pos();
+    dur := CurLen;
+    if st = NCA_ENDED then title := 'end of stream'
+    else if (dur > 0) and (rawPos > dur + 1) then title := 'position past the length'
+    else if (st = NCA_STOPPED) or ((st = NCA_PLAYING) and (dur > 0) and (rawPos >= dur - 0.05)) then
     begin
+      if FEndSince = 0 then FEndSince := GetTickCount64
+      else if GetTickCount64 - FEndSince >= 1500 then
+        if st = NCA_STOPPED then title := 'engine stopped' else title := 'stuck at the end';
+    end
+    else FEndSince := 0;
+    if title <> '' then
+    begin
+      FEndSince := 0;
+      DebugLog(Format('track end: #%d "%s" at %.2f / %.2f s (%s)',
+        [FCur + 1, DisplayTitle(FCur), rawPos, dur, title]));
       NextTrack(True);
       Exit;
     end;
+  end
+  else FEndSince := 0;
 
   if AudioLoaded and FVisOn and (FState = psPlaying) and FStream and
     (nca_get_fft(@fft[0]) <> 0) then

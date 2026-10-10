@@ -307,6 +307,15 @@ static ma_device g_dev; static int g_devOk = 0, g_lockOk = 0;
 static ma_mutex g_lock;
 static ma_decoder *g_dec = NULL;
 static volatile int g_state = NCA_STOPPED;
+/* track length in output (device-rate) frames, measured ONCE when the decoder is built; 0 = unknown.
+   Never ask the decoder for its length while it plays: for an MP3 without a Xing/Info header
+   dr_mp3 answers by rescanning the whole file and then seeking back to where it was, and if that
+   seek-back fails (or lands elsewhere) the stream is left at an earlier spot while the decoder's
+   cursor - our playback position - keeps counting: the song repeats and the time runs past the
+   duration without the end ever being reached. */
+static ma_uint64 g_lenFrames = 0;
+static volatile int g_endReason = 0;   /* 1 = decoder hit EOF, 2 = known length reached (logged by nca_poll) */
+static volatile double g_endPos = 0;
 static volatile float g_vol = 1.0f, g_pan = 0.0f;
 static float g_ring[RING]; static volatile LONG g_ringPos = 0;
 static char g_err[256] = "";
@@ -324,8 +333,17 @@ static void cb(ma_device *dev, void *out, const void *in, ma_uint32 frames)
     (void)in; (void)dev;
     ma_mutex_lock(&g_lock);
     if (g_dec && g_state == NCA_PLAYING) {
-        ma_decoder_read_pcm_frames(g_dec, o, frames, &got);
-        if (got < frames) g_state = NCA_ENDED;
+        ma_uint64 want = frames, cur = 0;
+        if (g_lenFrames) {        /* never play past the known length */
+            ma_decoder_get_cursor_in_pcm_frames(g_dec, &cur);
+            want = cur >= g_lenFrames ? 0 : (g_lenFrames - cur < frames ? g_lenFrames - cur : frames);
+        }
+        if (want) ma_decoder_read_pcm_frames(g_dec, o, want, &got);
+        if (got < frames) {
+            g_state = NCA_ENDED;
+            g_endReason = (got < want || !g_lenFrames) ? 1 : 2;
+            g_endPos = g_dec->outputSampleRate ? (double)(cur + got) / g_dec->outputSampleRate : 0;
+        }
     }
     ma_mutex_unlock(&g_lock);
     if (got < frames) memset(o + got * 2, 0, (size_t)(frames - got) * 2 * sizeof(float));
@@ -588,14 +606,32 @@ static int nca_calc_bitrate(const wchar_t *path, double seconds)
     return kbps;
 }
 
-static void nca_fill_info(ma_decoder *d, const wchar_t *path, nca_info *info)
+/* length of the decoder's source in its native frames (+ native rate); one scan for header-less MP3 */
+static ma_uint64 nca_src_len(ma_decoder *d, ma_uint32 *srOut)
 {
     ma_format f; ma_uint32 ch = 0, sr = 0; ma_uint64 len = 0;
+    if (d->pBackend) ma_data_source_get_data_format(d->pBackend, &f, &ch, &sr, NULL, 0);
+    if (!d->pBackend || ma_data_source_get_length_in_pcm_frames(d->pBackend, &len) != MA_SUCCESS) len = 0;
+    if (srOut) *srOut = sr;
+    return len;
+}
+
+/* the same length in output frames (what the decoder cursor counts) */
+static ma_uint64 nca_out_len(ma_decoder *d, ma_uint64 srcLen, ma_uint32 sr)
+{
+    if (!srcLen || !sr || !d->outputSampleRate) return 0;
+    if (sr == d->outputSampleRate) return srcLen;
+    return ma_calculate_frame_count_after_resampling(d->outputSampleRate, sr, srcLen);
+}
+
+static void nca_fill_info(ma_decoder *d, const wchar_t *path, nca_info *info, ma_uint64 len)
+{
+    ma_format f; ma_uint32 ch = 0, sr = 0;
     const wchar_t *dot;
     memset(info, 0, sizeof(*info));
     if (d->pBackend) ma_data_source_get_data_format(d->pBackend, &f, &ch, &sr, NULL, 0);
     info->channels = (int)ch; info->sample_rate = (int)sr;
-    if (d->pBackend && ma_data_source_get_length_in_pcm_frames(d->pBackend, &len) == MA_SUCCESS && sr && len) info->length = (double)len / sr;
+    if (sr && len) info->length = (double)len / sr;
     else info->length = -1;
     info->bitrate = nca_calc_bitrate(path, info->length);
     dot = wcsrchr(path, L'.');
@@ -612,8 +648,13 @@ NCA_API int nca_open(const wchar_t *path, nca_info *info)
     c = nca_cfg(1);
     r = ma_decoder_init_file_w(path, &c, d);
     if (r != MA_SUCCESS) { free(d); snprintf(g_err, sizeof g_err, "cannot decode (%s)", ma_result_description(r)); return 0; }
-    if (info) nca_fill_info(d, path, info);
-    ma_mutex_lock(&g_lock);
+    {
+        ma_uint32 sr = 0; ma_uint64 srcLen = nca_src_len(d, &sr), outLen = nca_out_len(d, srcLen, sr);
+        ma_decoder_seek_to_pcm_frame(d, 0);   /* the length scan must leave the stream at the start */
+        if (info) nca_fill_info(d, path, info, srcLen);
+        ma_mutex_lock(&g_lock);
+        g_lenFrames = outLen; g_endReason = 0;
+    }
     old = g_dec; g_dec = d; g_state = NCA_STOPPED;
     wcsncpy(g_path, path, MAX_PATH * 4 - 1); g_path[MAX_PATH * 4 - 1] = 0;
     ma_mutex_unlock(&g_lock);
@@ -625,7 +666,7 @@ NCA_API void nca_close(void)
 {
     ma_decoder *old;
     if (!g_lockOk) return;
-    ma_mutex_lock(&g_lock); old = g_dec; g_dec = NULL; g_state = NCA_STOPPED; ma_mutex_unlock(&g_lock);
+    ma_mutex_lock(&g_lock); old = g_dec; g_dec = NULL; g_state = NCA_STOPPED; g_lenFrames = 0; ma_mutex_unlock(&g_lock);
     if (old) { ma_decoder_uninit(old); free(old); }
 }
 
@@ -645,19 +686,21 @@ NCA_API double nca_get_pos(void)
     ma_uint64 c = 0; double r = 0;
     if (!g_lockOk) return 0;
     ma_mutex_lock(&g_lock);
-    if (g_dec && ma_decoder_get_cursor_in_pcm_frames(g_dec, &c) == MA_SUCCESS && g_dec->outputSampleRate)
+    if (g_dec && ma_decoder_get_cursor_in_pcm_frames(g_dec, &c) == MA_SUCCESS && g_dec->outputSampleRate) {
+        if (g_lenFrames && c > g_lenFrames) c = g_lenFrames;   /* the position never exceeds the length */
         r = (double)c / g_dec->outputSampleRate;
+    }
     ma_mutex_unlock(&g_lock);
     return r;
 }
 
+/* cached at open / rebuild: no decoder call (see g_lenFrames) */
 NCA_API double nca_get_len(void)
 {
-    ma_uint64 l = 0; double r = 0;
+    double r = 0;
     if (!g_lockOk) return 0;
     ma_mutex_lock(&g_lock);
-    if (g_dec && ma_decoder_get_length_in_pcm_frames(g_dec, &l) == MA_SUCCESS && g_dec->outputSampleRate)
-        r = (double)l / g_dec->outputSampleRate;
+    if (g_dec && g_lenFrames && g_dec->outputSampleRate) r = (double)g_lenFrames / g_dec->outputSampleRate;
     ma_mutex_unlock(&g_lock);
     return r;
 }
@@ -669,7 +712,11 @@ NCA_API int nca_seek(double sec)
     if (sec < 0) sec = 0;
     ma_mutex_lock(&g_lock);
     if (g_dec) {
-        ok = ma_decoder_seek_to_pcm_frame(g_dec, (ma_uint64)(sec * g_dec->outputSampleRate)) == MA_SUCCESS;
+        ma_uint64 t = (ma_uint64)(sec * g_dec->outputSampleRate), was = 0;
+        if (g_lenFrames && t > g_lenFrames) t = g_lenFrames;
+        ma_decoder_get_cursor_in_pcm_frames(g_dec, &was);
+        ok = ma_decoder_seek_to_pcm_frame(g_dec, t) == MA_SUCCESS;
+        if (!ok) ma_decoder_seek_to_pcm_frame(g_dec, was);   /* keep stream and cursor in step */
         if (g_state == NCA_ENDED) g_state = NCA_PLAYING;
     }
     ma_mutex_unlock(&g_lock);
@@ -720,7 +767,7 @@ NCA_API int nca_probe(const wchar_t *path, nca_info *info)
     nca_setup();
     c = nca_cfg(0);
     if (ma_decoder_init_file_w(path, &c, &d) != MA_SUCCESS) return 0;
-    nca_fill_info(&d, path, info);
+    nca_fill_info(&d, path, info, nca_src_len(&d, NULL));
     ma_decoder_uninit(&d);
     return 1;
 }
@@ -793,10 +840,15 @@ static void nca_reopen(const char *why)
         st = g_state;
         ma_mutex_unlock(&g_lock);
         if (d && ma_decoder_init_file_w(g_path, &cfg, d) == MA_SUCCESS) {
-            ma_decoder_seek_to_pcm_frame(d, (ma_uint64)(posSec * g_dev.sampleRate));
-            ma_mutex_lock(&g_lock); old = g_dec; g_dec = d; g_state = st; ma_mutex_unlock(&g_lock);
+            ma_uint32 sr = 0; ma_uint64 srcLen = nca_src_len(d, &sr), outLen = nca_out_len(d, srcLen, sr), t;
+            t = (ma_uint64)(posSec * g_dev.sampleRate);
+            if (outLen && t > outLen) t = outLen;
+            ma_decoder_seek_to_pcm_frame(d, 0);
+            if (t) ma_decoder_seek_to_pcm_frame(d, t);
+            ma_mutex_lock(&g_lock); old = g_dec; g_dec = d; g_state = st; g_lenFrames = outLen; ma_mutex_unlock(&g_lock);
             if (old) { ma_decoder_uninit(old); free(old); }
-            nca_log("decoder rebuilt for %u Hz, resumed at %.2f s", g_dev.sampleRate, posSec);
+            nca_log("decoder rebuilt for %u Hz, resumed at %.2f s (length %.2f s)", g_dev.sampleRate, posSec,
+                    outLen ? (double)outLen / g_dev.sampleRate : 0.0);
         } else free(d);
     }
     nca_describe();
@@ -812,7 +864,12 @@ NCA_API void nca_poll(void)
         testMode = strcmp(v, "stop") == 0 ? 1 : strcmp(v, "reopen") == 0 ? 2 : 0;
         testAt = now + 5000;
     }
-    if (g_shuttingDown || !g_pollEnabled) return;
+    if (g_shuttingDown) return;
+    if (g_endReason) {
+        int r = g_endReason; g_endReason = 0;
+        nca_log("end of stream at %.2f s (%s)", g_endPos, r == 2 ? "known length reached" : "decoder EOF");
+    }
+    if (!g_pollEnabled) return;
     if (!g_devOk) {              /* a reopen failed earlier: retry every 2 s */
         if (now - lastCheck >= 2000) { lastCheck = now; nca_reopen("retry"); }
         return;

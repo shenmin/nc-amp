@@ -1,5 +1,11 @@
 # Changelog
 
+## 1.7.7 - 2026-10-10
+
+- Fixed: a track could keep playing past its end, with the time running beyond the duration (e.g. 30:33 on a 3:33 song) and the next track never starting. This affected MP3 files without a Xing/Info header. Their length used to be recomputed several times per screen refresh by rescanning the whole file and then seeking back. If that seek-back failed, for example on a brief read hiccup from a synced or network drive, the song restarted from the beginning while the time kept counting. The length is now measured once when a track is opened (and again when the decoder is rebuilt for a new output device), so the file is no longer rescanned during playback. This also stops a small skip of audio and the needless file reads on every repaint.
+- Playback never runs past the known length: the engine stops there and the next track in the shuffle order starts. As a safety net, the player also advances if the position reaches the length and stays there, or if the engine stops on its own. The time readout and the seek bar are clamped to the track length; if the engine cannot tell the length, the duration from the playlist is used.
+- The log (NCAMP_LOG) records every track end, with position, length and reason, and every advance, with the next track and its place in the shuffle order.
+
 ## 1.7.6 - 2026-10-10
 
 - When the main window is collapsed (shade mode), hovering the empty part of the bar shows the current song title in a tooltip styled like the LCD: pale green LCD background, dark LCD text, a thin soft outline in a slightly darker shade of the same green, and equal padding on all four sides with the text vertically centred. It uses the system UI font, about 1 pt smaller than the standard tooltip size, at the monitor's DPI; padding, border and wrap width (long titles wrap at about 480 px) scale with the DPI. The text follows track changes while it is shown. Buttons, time and seek strip show no tooltip, nothing is shown when no track is loaded, and the expanded window is unchanged.
