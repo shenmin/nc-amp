@@ -1,6 +1,6 @@
 # Changelog
 
-## 2.0.0 - 2026-10-10
+## 2.0.0 - 2026-10-11
 
 - The audio engine is now linked directly into nc-amp.exe. Earlier versions carried it as ncaudio.dll inside the exe and unpacked it to the temp folder (%TEMP%\nc-amp_engine_...) at every start. nc-amp is now a true single-file program: it writes no DLL anywhere and loads only Windows system libraries. Start-up no longer depends on a writable temp folder, and no stale engine folders are left behind.
 - Playback, formats (MP3, FLAC, OGG Vorbis, Opus, M4A/AAC, WAV), the spectrum analyser, seeking, device switching and auto-pause, and resume work exactly as in 1.7.8. The exe is about 36 KB smaller.
