@@ -2,8 +2,9 @@
 
 nc-amp is licensed under the **GNU General Public License v3.0 or later** (see [LICENSE](LICENSE)).
 It contains or links the components below. Every one of them is under a licence that is
-compatible with GPL-3.0-or-later (public domain / MIT-0 / MIT / BSD-3-Clause / OFL-1.1 /
-LGPL with static-linking exception / GCC Runtime Library Exception). No proprietary code,
+compatible with GPL-3.0-or-later (public domain / MIT-0 / MIT / BSD-3-Clause / ZPL-2.1 /
+Lucent permissive notice / OFL-1.1 / LGPL with static-linking exception / GCC Runtime Library
+Exception). No proprietary code,
 library or codec is included in the source tree or in `nc-amp.exe`.
 
 | Component | Used for | Licence | GPL-3.0 compatible |
@@ -19,13 +20,12 @@ library or codec is included in the source tree or in `nc-amp.exe`.
 | [Audiowide](https://fonts.google.com/specimen/Audiowide) | "nc-amp" title lettering (glyph outlines converted to vectors at build time) | SIL Open Font License 1.1 | yes |
 | [Free Pascal](https://www.freepascal.org) RTL / FCL | runtime library | LGPL-2.1 with static-linking exception | yes |
 | [Lazarus](https://www.lazarus-ide.org) LCL / LazUtils | GUI framework | LGPL-2.1 with static-linking exception (modified LGPL) | yes |
-| MinGW-w64 runtime (winpthreads, libgcc) | statically linked into `ncaudio.dll` | MIT (expat) / BSD; libgcc: GPL-3.0 with GCC Runtime Library Exception | yes |
+| MinGW-w64 runtime (parts of libmingwex and the static helpers of libmsvcrt), libgcc (`__chkstk_ms`) | C runtime helpers for the audio engine (number formatting, maths), statically linked into `nc-amp.exe` | ZPL-2.1 / public domain; gdtoa and `mingw_pformat`: Lucent (permissive); libgcc: GPL-3.0 with GCC Runtime Library Exception | yes |
 
 Notes
 
-- The audio engine `ncaudio.dll` (source: `src/engine/ncaudio.c`, GPL-3.0-or-later) is built from
-  the components above and embedded in `nc-amp.exe` as a resource; it is unpacked to
-  `%TEMP%\nc-amp_engine_<hash>\` at start-up.
+- The audio engine (source: `src/engine/`, GPL-3.0-or-later) is built from the components above
+  and statically linked into `nc-amp.exe`; nothing is unpacked or written to disk at run time.
 - AAC decoding uses the decoder that ships with Windows (Media Foundation). On Windows "N"
   editions without the Media Feature Pack, M4A/AAC files are skipped; all other formats work.
 - The Free Pascal and Lazarus libraries are licensed under the LGPL with an exception that
@@ -440,26 +440,76 @@ FROM, OUT OF THE USE OR INABILITY TO USE THE FONT SOFTWARE OR FROM
 OTHER DEALINGS IN THE FONT SOFTWARE.
 ```
 
-## MinGW-w64 winpthreads (expat / MIT)
+## MinGW-w64 runtime (ZPL-2.1; most files public domain; gdtoa / mingw_pformat: Lucent)
+
+Most MinGW-w64 runtime files carry the notice "This file has no copyright assigned and is placed
+in the Public Domain." The runtime as a whole is distributed under the following licence:
 
 ```text
-Copyright (c) 2011-2016 mingw-w64 project
+Copyright (c) 2009-2016 the mingw-w64 project
 
-Permission is hereby granted, free of charge, to any person obtaining a
-copy of this software and associated documentation files (the "Software"),
-to deal in the Software without restriction, including without limitation
-the rights to use, copy, modify, merge, publish, distribute, sublicense,
-and/or sell copies of the Software, and to permit persons to whom the
-Software is furnished to do so, subject to the following conditions:
+Redistribution and use in source and binary forms, with or without
+modification, are permitted provided that the following conditions
+are met:
 
-The above copyright notice and this permission notice shall be included in
-all copies or substantial portions of the Software.
+   1. Redistributions in source code must retain the accompanying
+      copyright notice, this list of conditions, and the following
+      disclaimer.
+   2. Redistributions in binary form must reproduce the accompanying
+      copyright notice, this list of conditions, and the following
+      disclaimer in the documentation and/or other materials provided
+      with the distribution.
+   3. Names of the copyright holders must not be used to endorse or
+      promote products derived from this software without prior
+      written permission from the copyright holders.
+   4. The right to distribute this software or to use it for any
+      purpose does not give you the right to use Servicemarks (sm) or
+      Trademarks (tm) of the copyright holders.  Use of them is
+      covered by separate agreement with the copyright holders.
+   5. If any files are modified, you must cause the modified files to
+      carry prominent notices stating that you changed the files and
+      the date of any change.
 
-THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
-IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
-FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
-AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
-LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
-FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
-DEALINGS IN THE SOFTWARE.
+Disclaimer
+
+THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS ``AS IS'' AND ANY
+EXPRESSED OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
+IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR
+PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT HOLDERS BE
+LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR
+CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF
+SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR
+BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY,
+WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE
+OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE,
+EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 ```
+
+The floating-point conversion code (gdtoa) and `mingw_pformat.c`:
+
+```text
+Copyright (C) 1997-2001 Lucent Technologies
+All Rights Reserved
+
+Permission to use, copy, modify, and distribute this software and
+its documentation for any purpose and without fee is hereby
+granted, provided that the above copyright notice appear in all
+copies and that both that the copyright notice and this
+permission notice and warranty disclaimer appear in supporting
+documentation, and that the name of Lucent or any of its entities
+not be used in advertising or publicity pertaining to
+distribution of the software without specific, written prior
+permission.
+
+LUCENT DISCLAIMS ALL WARRANTIES WITH REGARD TO THIS SOFTWARE,
+INCLUDING ALL IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS.
+IN NO EVENT SHALL LUCENT OR ANY OF ITS ENTITIES BE LIABLE FOR ANY
+SPECIAL, INDIRECT OR CONSEQUENTIAL DAMAGES OR ANY DAMAGES
+WHATSOEVER RESULTING FROM LOSS OF USE, DATA OR PROFITS, WHETHER
+IN AN ACTION OF CONTRACT, NEGLIGENCE OR OTHER TORTIOUS ACTION,
+ARISING OUT OF OR IN CONNECTION WITH THE USE OR PERFORMANCE OF
+THIS SOFTWARE.
+```
+
+libgcc (`__chkstk_ms`) is covered by the GCC Runtime Library Exception, which permits it to be
+combined with programs under any licence without further obligations.

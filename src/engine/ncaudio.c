@@ -1,7 +1,7 @@
 /* SPDX-License-Identifier: GPL-3.0-or-later
  * Copyright (C) 2026 Shen Min
  *
- * ncaudio - the nc-amp audio engine (ncaudio.dll), built only from open-source parts:
+ * ncaudio - the nc-amp audio engine (linked into nc-amp.exe), built only from open-source parts:
  *   miniaudio (playback device; MP3/FLAC/WAV decoding via its bundled dr_libs code),
  *   stb_vorbis (Ogg Vorbis), libopus + opusfile + libogg (Opus),
  *   Windows Media Foundation (M4A / AAC, decoded by the OS - no codec is bundled).
@@ -39,7 +39,7 @@
 #undef STB_VORBIS_HEADER_ONLY
 #include "stb_vorbis.c"
 
-#define NCA_API __declspec(dllexport)
+#define NCA_API             /* linked statically into nc-amp.exe (2.0.0+), no exports */
 
 /* ------------------------------------------------------------------ */
 /* Media Foundation decoding backend (m4a / mp4 / aac)                 */

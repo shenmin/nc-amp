@@ -71,10 +71,10 @@ cd nc-amp
 `build.sh` 依次完成：
 
 1. `scripts/fetch-deps.sh` 下载固定版本的 libogg、libopus、opusfile 源码，并按 `third_party/deps.txt` 中的 SHA-256 校验。
-2. `scripts/build-engine.sh` 将它们编译为静态库，并与 `third_party/` 中的 miniaudio、stb_vorbis 一起把音频引擎 `src/engine/ncaudio.c` 编译成 `src/engine/ncaudio.dll`。
-3. `windres` 把清单、引擎和 LCD 字体打包进 `src/ncamp.res`，再用 `lazbuild` 构建 `src/nc-amp.lpi`。引擎 DLL 内嵌在 exe 中，启动时解压到 `%TEMP%`，因此最终只有一个文件。
+2. `scripts/build-engine.sh` 将它们编译为静态库，并把音频引擎 `src/engine/ncaudio.c`（连同 `third_party/` 中的 miniaudio、stb_vorbis）编译成目标文件，再从这些库和 MinGW 运行库中挑出引擎所需的目标文件，列在 `src/engine/objs.inc` 中。
+3. `windres` 把清单和 LCD 字体打包进 `src/ncamp.res`，再用 `lazbuild` 构建 `src/nc-amp.lpi`。Free Pascal 把引擎目标文件直接链接进 exe，因此最终只有一个文件，运行时不向磁盘写出任何文件。
 
-`src/engine/ncaudio.dll` 和 `src/ncamp.res` 生成后，也可以直接在 Lazarus IDE 中打开 `src/nc-amp.lpi`。
+`src/engine/objs.inc` 和 `src/ncamp.res` 生成后，也可以直接在 Lazarus IDE 中打开 `src/nc-amp.lpi`。
 
 目录结构：
 

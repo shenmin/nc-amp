@@ -9,7 +9,7 @@ Vendored here (single-file libraries, unmodified, licence text in each file):
 | `stb_vorbis/stb_vorbis.c` | [stb_vorbis](https://github.com/nothings/stb) - Ogg Vorbis decoder | 1.22 | Public domain (Unlicense) or MIT |
 
 Fetched at build time by `scripts/fetch-deps.sh` into `build/deps/` (pinned versions and
-SHA-256 checksums in `deps.txt`), built as static libraries and linked into `ncaudio.dll`:
+SHA-256 checksums in `deps.txt`), built as static libraries and linked into `nc-amp.exe`:
 
 | Component | Version | Licence |
 |---|---|---|

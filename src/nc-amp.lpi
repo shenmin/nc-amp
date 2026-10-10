@@ -12,10 +12,10 @@
     </General>
     <VersionInfo>
       <UseVersionInfo Value="True"/>
-      <MajorVersionNr Value="1"/>
-      <MinorVersionNr Value="7"/>
-      <RevisionNr Value="8"/>
-      <StringTable FileDescription="nc-amp - classic style music player" ProductName="nc-amp" ProductVersion="1.7.8" InternalName="nc-amp" LegalCopyright="Copyright (C) 2026 Shen Min" Comments="GPL-3.0-or-later" OriginalFilename="nc-amp.exe"/>
+      <MajorVersionNr Value="2"/>
+      <MinorVersionNr Value="0"/>
+      <RevisionNr Value="0"/>
+      <StringTable FileDescription="nc-amp - classic style music player" ProductName="nc-amp" ProductVersion="2.0.0" InternalName="nc-amp" LegalCopyright="Copyright (C) 2026 Shen Min" Comments="GPL-3.0-or-later" OriginalFilename="nc-amp.exe"/>
     </VersionInfo>
     <BuildModes Count="1">
       <Item1 Name="Default" Default="True"/>
@@ -93,6 +93,7 @@
     </Target>
     <SearchPaths>
       <IncludeFiles Value="$(ProjOutDir)"/>
+      <Libraries Value="engine/lib"/>
       <UnitOutputDirectory Value="lib/$(TargetCPU)-$(TargetOS)"/>
     </SearchPaths>
     <CodeGeneration>

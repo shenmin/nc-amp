@@ -18,3 +18,6 @@ __pycache__/
 *.pyc
 .DS_Store
 Thumbs.db
+/src/engine/obj/
+/src/engine/lib/
+/src/engine/objs.inc

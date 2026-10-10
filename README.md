@@ -71,10 +71,10 @@ cd nc-amp
 `build.sh` does three things:
 
 1. `scripts/fetch-deps.sh` downloads the pinned libogg, libopus and opusfile releases (checked against the SHA-256 sums in `third_party/deps.txt`).
-2. `scripts/build-engine.sh` builds them as static libraries and compiles the audio engine `src/engine/ncaudio.c` together with miniaudio and stb_vorbis (`third_party/`) into `src/engine/ncaudio.dll`.
-3. `windres` packs the manifest, engine and LCD font into `src/ncamp.res`, then `lazbuild` builds `src/nc-amp.lpi`. The engine DLL is embedded in the exe and unpacked to `%TEMP%` at start-up, so the result is a single file.
+2. `scripts/build-engine.sh` builds them as static libraries and compiles the audio engine `src/engine/ncaudio.c` (with miniaudio and stb_vorbis from `third_party/`) into object files. It then picks the objects the engine needs from those libraries and from the MinGW runtime, and lists them in `src/engine/objs.inc`.
+3. `windres` packs the manifest and LCD font into `src/ncamp.res`, then `lazbuild` builds `src/nc-amp.lpi`. Free Pascal links the engine objects straight into the exe, so the result is a single file that writes nothing to disk.
 
-Once `src/engine/ncaudio.dll` and `src/ncamp.res` exist you can also open `src/nc-amp.lpi` in the Lazarus IDE.
+Once `src/engine/objs.inc` and `src/ncamp.res` exist you can also open `src/nc-amp.lpi` in the Lazarus IDE.
 
 Repository layout:
 
