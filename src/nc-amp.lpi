@@ -14,8 +14,8 @@
       <UseVersionInfo Value="True"/>
       <MajorVersionNr Value="1"/>
       <MinorVersionNr Value="7"/>
-      <RevisionNr Value="5"/>
-      <StringTable FileDescription="nc-amp - classic style music player" ProductName="nc-amp" ProductVersion="1.7.5" InternalName="nc-amp" LegalCopyright="Copyright (C) 2026 Shen Min" Comments="GPL-3.0-or-later" OriginalFilename="nc-amp.exe"/>
+      <RevisionNr Value="6"/>
+      <StringTable FileDescription="nc-amp - classic style music player" ProductName="nc-amp" ProductVersion="1.7.6" InternalName="nc-amp" LegalCopyright="Copyright (C) 2026 Shen Min" Comments="GPL-3.0-or-later" OriginalFilename="nc-amp.exe"/>
     </VersionInfo>
     <BuildModes Count="1">
       <Item1 Name="Default" Default="True"/>
@@ -31,7 +31,7 @@
         <PackageName Value="LCL"/>
       </Item1>
     </RequiredPackages>
-    <Units Count="9">
+    <Units Count="10">
       <Unit0>
         <Filename Value="nc-amp.lpr"/>
         <IsPartOfProject Value="True"/>
@@ -79,6 +79,11 @@
         <IsPartOfProject Value="True"/>
         <UnitName Value="FolderPick"/>
       </Unit8>
+      <Unit9>
+        <Filename Value="nctip.pas"/>
+        <IsPartOfProject Value="True"/>
+        <UnitName Value="NcTip"/>
+      </Unit9>
     </Units>
   </ProjectOptions>
   <CompilerOptions>

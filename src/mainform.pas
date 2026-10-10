@@ -11,12 +11,12 @@ interface
 uses
   Windows, Messages, Classes, SysUtils, Math, Forms, Controls, Graphics,
   Dialogs, ExtCtrls, Menus, LCLType, LMessages, FileUtil, LazFileUtils, LazUTF8, IniFiles,
-  NcAudio, TagReader, TitleFont, NcTray, SingleInst, FolderPick;
+  NcAudio, TagReader, TitleFont, NcTray, SingleInst, FolderPick, NcTip;
 
 const
   APPNAME = 'nc-amp';
   APPTITLE = 'nc-amp';
-  APPVERSION = '1.7.5';
+  APPVERSION = '1.7.6';
   MAINW = 275;
   MAINH = 116;
   TITLEH = 16;        { ONE title-bar height for both windows (logical; scaled with identical rounding) }
@@ -116,6 +116,10 @@ type
     FSavedSig: string;
     FPLHash: QWord;
     FPLHashOk: Boolean;
+    { native tooltip with the song title over the collapsed (shade) main window }
+    FShadeTip: TNcTip;
+    FShadeTipKey: string;
+    procedure UpdateShadeTip;
     procedure TimerTick(Sender: TObject);
     procedure ResumeLast;
     procedure AutoSave;
@@ -1003,6 +1007,7 @@ end;
 
 procedure TMainForm.FormDestroy(Sender: TObject);
 begin
+  FreeAndNil(FShadeTip);
   Application.OnEndSession := nil;
   Application.OnQueryEndSession := nil;
   StopIpcServer;
@@ -1086,6 +1091,7 @@ begin
     FPL.SetBounds(FPL.Left, FPL.Top, SP(PLW), SP(PLHeight));
   end;
   InvalidateAll;
+  UpdateShadeTip;
 end;
 
 { WM_DPICHANGED arrives while LCL is still inside its own SetBounds/UpdateBounds
@@ -2286,6 +2292,7 @@ begin
         side := DockSideOf(BoundsRect, FPL.BoundsRect);
         FShade := not FShade;
         if FShade then SetBounds(Left, Top, SM(MAINW), SM(SHADEH)) else SetBounds(Left, Top, SM(MAINW), SM(MAINH));
+        UpdateShadeTip;
         if side = 2 then FPL.Top := Top + Height;
         DebugLog(Format('shade=%s scale=%.3f main=%dx%d (expected %dx%d)',
           [BoolToStr(FShade, True), FScaleMain, Width, Height, SM(MAINW), SM(IfThen(FShade, SHADEH, MAINH))]));
@@ -2436,6 +2443,50 @@ begin
     FTrayTip := t;
     FTray.SetTip(t);
   end;
+end;
+
+{ Shade mode: hovering the parts of the bar that are not buttons / time / seek
+  shows the current song title (the LCD display title) in a native tooltip.
+  Expanded mode: no tooltip. Called on shade toggle / rescale and every 500 ms. }
+procedure TMainForm.UpdateShadeTip;
+var
+  key, t: string;
+  h: Integer;
+
+  function R(x0, x1: Double): TRect;
+  begin
+    Result := Rect(Round(x0 * FScaleMain), 0, Round(x1 * FScaleMain), h);
+  end;
+
+begin
+  if not HandleAllocated or not ShownOnce then Exit;
+  if (FShadeTip <> nil) and (FShadeTip.Owner <> Handle) then FreeAndNil(FShadeTip);   { handle recreated }
+  if FShadeTip = nil then
+  begin
+    if not FShade then Exit;
+    FShadeTip := TNcTip.Create(Handle);
+    FShadeTipKey := '';
+    DebugLog(Format('shade tooltip created: hwnd=%d', [FShadeTip.Wnd]));
+  end;
+  h := ClientHeight;
+  key := Format('%s|%.4f|%d|%d', [BoolToStr(FShade, True), FScaleMain, h, FDpiMain]);
+  if key <> FShadeTipKey then
+  begin
+    FShadeTipKey := key;
+    FShadeTip.SetDpi(FDpiMain);
+    if FShade then
+      { the empty parts of the bar: logo/title area and the gaps between the
+        transport buttons, time, seek strip and the shade/close buttons (see HitMain) }
+      FShadeTip.SetRects([R(0, SH_BTN_X - 0.5), R(SH_BTN_X - 0.5 + 5 * SH_BTN_P, SH_TIME_X - 1),
+        R(SH_TIME_X + SH_TIME_W + 1, SH_SEEK_X - 2), R(SH_SEEK_X + SH_SEEK_W + 2, 245.5)])
+    else
+      FShadeTip.SetRects([]);
+    DebugLog(Format('shade tooltip: shade=%s dpi=%d scale=%.3f', [BoolToStr(FShade, True), FDpiMain, FScaleMain]));
+  end
+  else
+    FShadeTip.SetDpi(FDpiMain);   { re-applies the font if the system replaced it }
+  if FShade and (FCur >= 0) and (FCur < FCount) then t := DisplayTitle(FCur) else t := '';
+  FShadeTip.SetText(t);
 end;
 
 function TMainForm.DisplayTitle(i: Integer): string;
@@ -3082,6 +3133,7 @@ begin
     FLastDpiCheck := GetTickCount64;
     if FMoveWin = nil then CheckDpi('poll');
     AutoSave;
+    UpdateShadeTip;
   end;
   Invalidate;
   if FPL.Visible and (plDirty or ((GetTickCount64 div 25) mod 8 = 0)) then FPL.Invalidate;

@@ -1,5 +1,9 @@
 # Changelog
 
+## 1.7.6 - 2026-10-10
+
+- When the main window is collapsed (shade mode), hovering the empty part of the bar shows the current song title in a native Windows tooltip, using the system tooltip font at the monitor's DPI. The text follows track changes while it is shown. Buttons, time and seek strip show no tooltip, nothing is shown when no track is loaded, and the expanded window is unchanged.
+
 ## 1.7.5 - 2026-10-10
 
 - Resume on launch: nc-amp reopens the last track at the saved position and continues playing automatically (a track that was paused at exit comes back paused at that position). The shuffle order continues where it left off.
