@@ -2467,8 +2467,9 @@ begin
   begin
     if not FShade then Exit;
     FShadeTip := TNcTip.Create(Handle);
-    { LCD look: pale green LCD background, LCD ink, border in the LCD frame colour }
-    FShadeTip.SetColors(ColorToRGB(cSage), ColorToRGB(cInk), RGB(24, 24, 24));
+    { LCD look: pale green LCD background, LCD ink, soft outline in the same green
+      25% darker (192,216,184 -> 144,162,138) }
+    FShadeTip.SetColors(ColorToRGB(cSage), ColorToRGB(cInk), RGB(144, 162, 138));
     { comparison only: NCAMP_TIP_FONT=lcd renders the text with the LCD fonts }
     if SameText(GetEnvironmentVariable('NCAMP_TIP_FONT'), 'lcd') then FShadeTip.OnDraw := @LcdTipDraw;
     FShadeTipKey := '';

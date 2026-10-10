@@ -61,7 +61,8 @@ const
   CS_DROPSHADOW = $00020000;
   WS_EX_NOACTIVATE = $08000000;
   DT_FLAGS = DT_WORDBREAK or DT_EDITCONTROL or DT_NOPREFIX;
-  PAD96 = 7;          { padding on every side at 96 DPI }
+  TEXT_SCALE = 8 / 9; { text ~1 pt smaller than the system tooltip font (9 -> 8 pt) }
+  PAD96 = 7;          { padding on every side at 96 DPI, before TEXT_SCALE }
   MAXW96 = 480;       { wrap width (whole tooltip) at 96 DPI }
   CURSOR96 = 20;      { tooltip top below the hot spot, like the native one }
 
@@ -188,11 +189,13 @@ begin
     if (sysDpi > 0) and (sysDpi <> FDpi) then
       m.lfStatusFont.lfHeight := MulDiv(m.lfStatusFont.lfHeight, FDpi, sysDpi);
   end;
+  { a little smaller than the system tooltip size, same face }
+  m.lfStatusFont.lfHeight := Round(m.lfStatusFont.lfHeight * TEXT_SCALE);
   f := CreateFontIndirectW(@m.lfStatusFont);
   if f = 0 then Exit;
   if FFont <> 0 then DeleteObject(FFont);
   FFont := f;
-  FPad := Trunc(PAD96 * FDpi / 96 + 0.5);      { half up: 10.5 -> 11 }
+  FPad := Trunc(PAD96 * TEXT_SCALE * FDpi / 96 + 0.5);   { padding scales with the text; half up }
   FBw := Max(1, Trunc(FDpi / 96 + 0.5));
   Measure;
 end;
