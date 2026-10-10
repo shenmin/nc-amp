@@ -16,7 +16,7 @@ uses
 const
   APPNAME = 'nc-amp';
   APPTITLE = 'nc-amp';
-  APPVERSION = '1.7.4';
+  APPVERSION = '1.7.5';
   MAINW = 275;
   MAINH = 116;
   TITLEH = 16;        { ONE title-bar height for both windows (logical; scaled with identical rounding) }
@@ -103,7 +103,25 @@ type
     FMoveStart, FWinStart: TPoint;
     FMoveDocked: Boolean;
     FResizeStartY, FResizeStartRows: Integer;
+    { resume on launch: state read from nc-amp.ini [resume] by LoadState }
+    FCurPath: string;            { file open in the engine (survives playlist edits) }
+    FResPath: string;
+    FResIdx, FResOrderPos: Integer;
+    FResPos: Double;
+    FResPlaying, FResHave: Boolean;
+    FResOrder: array of Integer; { saved shuffle order, as playlist-file line indices }
+    FLineMap: array of Integer;  { playlist-file line index -> track index (-1 = not loaded) }
+    { periodic state saving }
+    FLastSave: QWord;
+    FSavedSig: string;
+    FPLHash: QWord;
+    FPLHashOk: Boolean;
     procedure TimerTick(Sender: TObject);
+    procedure ResumeLast;
+    procedure AutoSave;
+    function StateSig: string;
+    procedure AppEndSession(Sender: TObject);
+    procedure AppQueryEndSession(var Cancel: Boolean);
     procedure LogEngine;
     function OsdText: string;
     procedure ShowOsd(id: TBtnId);
@@ -148,7 +166,7 @@ type
     function AddPaths(const Paths: array of string): Integer;
     procedure AddOne(const fn: string);
     procedure BuildShuffle(First, AvoidFirst: Integer);
-    procedure PlayIndex(i: Integer);
+    procedure PlayIndex(i: Integer; StartAt: Double = 0; StartPaused: Boolean = False);
     procedure UserPlay(i: Integer);
     procedure NextTrack(Auto: Boolean);
     procedure PrevTrack;
@@ -900,6 +918,8 @@ begin
   BuildTray;
   FIpcPending := TStringList.Create;
   StartIpcServer(@IpcRequest);   { second instances forward their files here }
+  Application.OnEndSession := @AppEndSession;
+  Application.OnQueryEndSession := @AppQueryEndSession;
   LoadState;
 
   SetLength(args, 0);
@@ -908,7 +928,12 @@ begin
     SetLength(args, Length(args) + 1);
     args[High(args)] := ParamStr(i);
   end;
+  { files on the command line take priority; otherwise continue where we left off }
   if Length(args) > 0 then OnDrop(nil, args);
+  if FCur < 0 then ResumeLast
+  else DebugLog('resume: skipped, files passed on the command line');
+  FSavedSig := StateSig;
+  FLastSave := GetTickCount64;
 
   FTimer := TTimer.Create(Self);
   FTimer.Interval := 25;
@@ -978,6 +1003,8 @@ end;
 
 procedure TMainForm.FormDestroy(Sender: TObject);
 begin
+  Application.OnEndSession := nil;
+  Application.OnQueryEndSession := nil;
   StopIpcServer;
   FreeAndNil(FIpcPending);
   FreeAndNil(FTray);
@@ -1154,6 +1181,24 @@ begin
   if TheMessage.Msg = WM_NCAMP_APPLYDPI then
   begin
     ApplyPendingDpi(0);
+    TheMessage.Result := 0;
+    Exit;
+  end;
+  { logoff / shutdown / restart: the process may be killed without FormDestroy }
+  if TheMessage.Msg = WM_QUERYENDSESSION then
+  begin
+    DebugLog('WM_QUERYENDSESSION: saving state');
+    SaveState;
+    TheMessage.Result := 1;
+    Exit;
+  end;
+  if TheMessage.Msg = WM_ENDSESSION then
+  begin
+    if TheMessage.WParam <> 0 then
+    begin
+      DebugLog('WM_ENDSESSION: saving state');
+      SaveState;
+    end;
     TheMessage.Result := 0;
     Exit;
   end;
@@ -2539,7 +2584,7 @@ begin
   InvalidateAll;
 end;
 
-procedure TMainForm.PlayIndex(i: Integer);
+procedure TMainForm.PlayIndex(i: Integer; StartAt: Double; StartPaused: Boolean);
 var
   w: UnicodeString;
   info: TNcaInfo;
@@ -2569,6 +2614,7 @@ begin
   end;
   FFailStreak := 0;
   FStatusMsg := '';
+  FCurPath := FTracks[i].Path;
   FTracks[i].Bad := False;
   if not FTracks[i].Scanned then
   begin
@@ -2582,11 +2628,18 @@ begin
   FBitrate := info.Bitrate;
   if FBitrate <= 0 then FBitrate := Round(info.SampleRate * info.Channels * 16 / 1000);
   ApplyVolume;
-  nca_play();
-  FState := psPlaying;
+  if StartAt > 0 then nca_seek(StartAt);   { before nca_play: no blip from 0:00 }
+  if StartPaused then
+    FState := psPaused                     { engine stays stopped at StartAt; Play continues }
+  else
+  begin
+    nca_play();
+    FState := psPlaying;
+  end;
   FMarqueeOfs := 0;
-  DebugLog(Format('play %d %s [%s %d Hz %d ch %d kbps %.1f s]', [i + 1, DisplayTitle(i),
-    string(PAnsiChar(@info.Codec[0])), info.SampleRate, info.Channels, info.Bitrate, CurLen]));
+  DebugLog(Format('play %d %s [%s %d Hz %d ch %d kbps %.1f s]%s', [i + 1, DisplayTitle(i),
+    string(PAnsiChar(@info.Codec[0])), info.SampleRate, info.Channels, info.Bitrate, CurLen,
+    BoolToStr(StartAt > 0, Format(' at %.1f s', [StartAt]), '') + BoolToStr(StartPaused, ' (paused)', '')]));
   InvalidateAll;
 end;
 
@@ -3028,6 +3081,7 @@ begin
   begin
     FLastDpiCheck := GetTickCount64;
     if FMoveWin = nil then CheckDpi('poll');
+    AutoSave;
   end;
   Invalidate;
   if FPL.Visible and (plDirty or ((GetTickCount64 div 25) mod 8 = 0)) then FPL.Invalidate;
@@ -3056,23 +3110,105 @@ begin
   end;
 end;
 
-procedure TMainForm.SaveState;
+const
+  AUTOSAVE_MS = 30000;     { periodic save while playing (crash / power loss / kill) }
+
+function DotFmt: TFormatSettings;
+begin
+  Result := DefaultFormatSettings;
+  Result.DecimalSeparator := '.';
+end;
+
+{ write a text file via a temporary file + atomic replace, so a crash or power loss
+  while saving can never leave a truncated playlist / ini behind }
+function SaveLinesAtomic(L: TStrings; const fn: string): Boolean;
 var
-  dir: string;
-  L: TStringList;
-  ini: TIniFile;
+  tmp: string;
+begin
+  tmp := fn + '.tmp';
+  L.WriteBOM := False;
+  L.SaveToFile(tmp);
+  Result := MoveFileExW(PWideChar(UTF8Decode(tmp)), PWideChar(UTF8Decode(fn)),
+    MOVEFILE_REPLACE_EXISTING or $8 { MOVEFILE_WRITE_THROUGH });
+  if not Result then DeleteFile(tmp);
+end;
+
+function PathHash(const s: string; h: QWord): QWord;
+var
   i: Integer;
 begin
+  Result := h;
+  for i := 1 to Length(s) do
+    Result := (Result xor Ord(s[i])) * QWord(1099511628211);
+  Result := (Result xor 10) * QWord(1099511628211);
+end;
+
+function TMainForm.StateSig: string;
+begin
+  Result := Format('%d|%d|%d|%d|%s', [FCur, Ord(FState), FCount, FOrderPos, FCurPath]);
+end;
+
+{ called every 500 ms from the timer: save when the track / play state / playlist
+  changed, and every 30 s while playing }
+procedure TMainForm.AutoSave;
+var
+  sig: string;
+  why: string;
+begin
+  sig := StateSig;
+  why := '';
+  if sig <> FSavedSig then why := 'state change'
+  else if (FState = psPlaying) and (GetTickCount64 - FLastSave >= AUTOSAVE_MS) then why := 'periodic';
+  if why = '' then Exit;
+  SaveState;
+  FSavedSig := sig;
+  DebugLog(Format('state saved (%s): track=%d pos=%.1f state=%d', [why, FCur, CurPos, Ord(FState)]));
+end;
+
+procedure TMainForm.AppEndSession(Sender: TObject);
+begin
+  DebugLog('end session: saving state');
+  SaveState;
+end;
+
+procedure TMainForm.AppQueryEndSession(var Cancel: Boolean);
+begin
+  DebugLog('query end session: saving state');
+  SaveState;
+  Cancel := False;
+end;
+
+procedure TMainForm.SaveState;
+var
+  dir, ord, curPath: string;
+  L: TStringList;
+  ini: TMemIniFile;
+  i, curIdx: Integer;
+  h: QWord;
+  ok: Boolean;
+begin
+  FLastSave := GetTickCount64;
   try
     dir := ConfigDir;
-    L := TStringList.Create;
-    try
-      for i := 0 to FCount - 1 do L.Add(FTracks[i].Path);
-      L.SaveToFile(dir + 'playlist.m3u8');
-    finally
-      L.Free;
+    { the playlist is only rewritten when it actually changed }
+    h := QWord(14695981039346656037);
+    for i := 0 to FCount - 1 do h := PathHash(FTracks[i].Path, h);
+    if not FPLHashOk or (h <> FPLHash) or not FileExists(dir + 'playlist.m3u8') then
+    begin
+      L := TStringList.Create;
+      try
+        for i := 0 to FCount - 1 do L.Add(FTracks[i].Path);
+        if SaveLinesAtomic(L, dir + 'playlist.m3u8') then
+        begin
+          FPLHash := h;
+          FPLHashOk := True;
+        end;
+      finally
+        L.Free;
+      end;
     end;
-    ini := TIniFile.Create(dir + 'nc-amp.ini');
+    ini := TMemIniFile.Create(dir + 'nc-amp.ini');
+    L := TStringList.Create;
     try
       ini.WriteInteger('main', 'volume', FVolume);
       ini.WriteInteger('main', 'balance', FBalance);
@@ -3093,20 +3229,60 @@ begin
         ini.WriteInteger('pos', 'plleft', FPL.Left);
         ini.WriteInteger('pos', 'pltop', FPL.Top);
       end;
+      { resume on next launch }
+      ini.EraseSection('resume');
+      curIdx := FCur;
+      if FStream then curPath := FCurPath else curPath := '';
+      if (curIdx >= 0) and (curIdx < FCount) and FStream then curPath := FTracks[curIdx].Path;
+      if (curPath <> '') or (curIdx >= 0) then
+      begin
+        ini.WriteString('resume', 'path', curPath);
+        ini.WriteInteger('resume', 'index', curIdx);
+        ini.WriteString('resume', 'pos', FormatFloat('0.000', CurPos, DotFmt));
+        ini.WriteBool('resume', 'playing', FState = psPlaying);
+        ok := Length(FOrder) = FCount;
+        if ok then
+          for i := 0 to FCount - 1 do
+            if (FOrder[i] < 0) or (FOrder[i] >= FCount) then ok := False;
+        if ok and (FCount > 0) then
+        begin
+          ord := '';
+          for i := 0 to FCount - 1 do
+          begin
+            if i > 0 then ord := ord + ',';
+            ord := ord + IntToStr(FOrder[i]);
+          end;
+          ini.WriteString('resume', 'order', ord);
+          ini.WriteInteger('resume', 'orderpos', FOrderPos);
+          ini.WriteString('resume', 'plhash', IntToHex(h, 16));   { order is only valid for this playlist }
+        end;
+      end;
+      ini.GetStrings(L);
+      SaveLinesAtomic(L, dir + 'nc-amp.ini');
+      ini.Rename(dir + 'nc-amp.ini.discard', False);   { never let Destroy rewrite the ini }
     finally
+      L.Free;
       ini.Free;
+      if FileExists(dir + 'nc-amp.ini.discard') then DeleteFile(dir + 'nc-amp.ini.discard');
     end;
   except
+    on E: Exception do DebugLog('save state failed: ' + E.Message);
   end;
 end;
 
 procedure TMainForm.LoadState;
 var
-  dir: string;
+  dir, ord: string;
   L: TStringList;
   ini: TIniFile;
-  i: Integer;
+  i, n, v: Integer;
+  parts: TStringArray;
+  h: QWord;
 begin
+  FResHave := False;
+  FResIdx := -1; FResOrderPos := -1; FResPos := 0;
+  SetLength(FResOrder, 0);
+  SetLength(FLineMap, 0);
   try
     dir := ConfigDir;
     if FileExists(dir + 'playlist.m3u8') then
@@ -3114,8 +3290,15 @@ begin
       L := TStringList.Create;
       try
         L.LoadFromFile(dir + 'playlist.m3u8');
+        n := 0;
         for i := 0 to L.Count - 1 do
-          if L[i] <> '' then AddOne(L[i]);
+          if L[i] <> '' then
+          begin
+            SetLength(FLineMap, n + 1);
+            FLineMap[n] := FCount;   { saved index n -> track index }
+            AddOne(L[i]);
+            Inc(n);
+          end;
       finally
         L.Free;
       end;
@@ -3149,6 +3332,45 @@ begin
           FTracks[FFocus].Selected := True;
           EnsureVisible(FFocus);
         end;
+        if ini.SectionExists('resume') then
+        begin
+          FResHave := True;
+          FResPath := ini.ReadString('resume', 'path', '');
+          FResIdx := ini.ReadInteger('resume', 'index', -1);
+          FResPos := StrToFloatDef(ini.ReadString('resume', 'pos', '0'), 0, DotFmt);
+          FResPlaying := ini.ReadBool('resume', 'playing', True);
+          FResOrderPos := ini.ReadInteger('resume', 'orderpos', -1);
+          ord := ini.ReadString('resume', 'order', '');
+          h := QWord(14695981039346656037);
+          for i := 0 to FCount - 1 do h := PathHash(FTracks[i].Path, h);
+          if (ord <> '') and not SameText(ini.ReadString('resume', 'plhash', ''), IntToHex(h, 16)) then
+          begin
+            DebugLog('resume: playlist changed since the order was saved; the shuffle order will be rebuilt');
+            ord := '';
+          end;
+          if ord <> '' then
+          begin
+            parts := ord.Split([',']);
+            SetLength(FResOrder, Length(parts));
+            n := 0;
+            for i := 0 to High(parts) do
+              if TryStrToInt(Trim(parts[i]), v) then
+              begin
+                FResOrder[n] := v;
+                Inc(n);
+              end;
+            SetLength(FResOrder, n);
+          end;
+        end
+        else if FFocus >= 0 then
+        begin
+          { settings from 1.7.4 or older: only the current index is known }
+          FResHave := True;
+          FResIdx := FFocus;
+          FResPath := '';
+          FResPos := 0;
+          FResPlaying := True;
+        end;
         if ini.ValueExists('pos', 'left') then
         begin
           HaveSavedPos := True;
@@ -3160,7 +3382,174 @@ begin
       end;
     end;
   except
+    on E: Exception do DebugLog('load state failed: ' + E.Message);
   end;
+end;
+
+{ continue the last session: same shuffle order, same track, same position.
+  Playback state is kept: auto-play if it was playing, else loaded and paused. }
+procedure TMainForm.ResumeLast;
+var
+  i, j, k, t, start, startPos, n, oldPos: Integer;
+  used: array of Boolean;
+  ord: array of Integer;
+  pos, len: Double;
+  exact: Boolean;
+
+  function MapIdx(saved: Integer): Integer;
+  begin
+    Result := -1;
+    if (saved >= 0) and (saved <= High(FLineMap)) then Result := FLineMap[saved];
+    if Result >= FCount then Result := -1;
+  end;
+
+  function Playable(idx: Integer): Boolean;
+  begin
+    Result := (idx >= 0) and (idx < FCount) and FileExists(FTracks[idx].Path);
+  end;
+
+begin
+  if not FResHave or (FCount = 0) or not AudioLoaded then
+  begin
+    DebugLog(Format('resume: nothing to resume (have=%s tracks=%d)', [BoolToStr(FResHave, True), FCount]));
+    Exit;
+  end;
+  pos := FResPos;
+
+  { 1. rebuild the shuffle order from the saved one (saved indices -> current tracks);
+       tracks no longer in the playlist are dropped, tracks not in it are inserted
+       randomly into the part not yet played }
+  SetLength(used, FCount);
+  for i := 0 to FCount - 1 do used[i] := False;
+  SetLength(ord, 0);
+  n := 0;
+  oldPos := -1;        { position in ord of the saved order position }
+  for i := 0 to High(FResOrder) do
+  begin
+    t := MapIdx(FResOrder[i]);
+    if (t >= 0) and not used[t] then
+    begin
+      SetLength(ord, n + 1);
+      ord[n] := t;
+      used[t] := True;
+      if i <= FResOrderPos then oldPos := n;
+      Inc(n);
+    end;
+  end;
+  exact := (n = FCount) and (Length(FResOrder) = FCount);
+  if n > 0 then
+  begin
+    for t := 0 to FCount - 1 do
+      if not used[t] then
+      begin
+        SetLength(ord, n + 1);
+        k := Max(oldPos + 1, 0) + Random(n - Max(oldPos + 1, 0) + 1);   { in [oldPos+1 .. n] }
+        for j := n downto k + 1 do ord[j] := ord[j - 1];
+        ord[k] := t;
+        Inc(n);
+      end;
+  end;
+
+  { 2. the track to start: saved path, else saved index }
+  start := -1;
+  if FResPath <> '' then
+  begin
+    if (FResIdx >= 0) and (MapIdx(FResIdx) >= 0) and SameText(FTracks[MapIdx(FResIdx)].Path, FResPath) then
+      start := MapIdx(FResIdx)
+    else
+      for i := 0 to FCount - 1 do
+        if SameText(FTracks[i].Path, FResPath) then begin start := i; Break; end;
+  end;
+  if (start < 0) and (FResPath = '') then start := MapIdx(FResIdx);
+
+  startPos := -1;
+  if start >= 0 then
+    for i := 0 to n - 1 do if ord[i] = start then begin startPos := i; Break; end;
+  if (start < 0) and (oldPos >= 0) then startPos := oldPos;   { removed track: continue from its slot }
+
+  { 3. file gone: next in order (from the saved position) }
+  if not Playable(start) then
+  begin
+    if start >= 0 then DebugLog('resume: saved track missing: ' + FTracks[start].Path)
+    else if FResPath <> '' then DebugLog('resume: saved track not in playlist: ' + FResPath);
+    pos := 0;
+    if n > 0 then
+    begin
+      j := startPos;
+      if start < 0 then Dec(j);  { slot of a removed track: its successor is at startPos }
+      start := -1;
+      for k := 1 to n do
+      begin
+        i := (j + k + n) mod n;
+        if Playable(ord[i]) then begin start := ord[i]; startPos := i; Break; end;
+      end;
+    end
+    else
+    begin
+      if start >= 0 then j := start + 1 else j := Max(MapIdx(FResIdx), 0);
+      start := -1;
+      for k := 0 to FCount - 1 do
+        if Playable((j + k) mod FCount) then begin start := (j + k) mod FCount; Break; end;
+    end;
+    if start < 0 then
+    begin
+      DebugLog('resume: no playable track found');
+      Exit;
+    end;
+  end;
+
+  if n = FCount then
+  begin
+    FOrder := ord;
+    FOrderPos := startPos;
+    if (FOrderPos < 0) or (FOrder[FOrderPos] <> start) then
+      for i := 0 to n - 1 do if FOrder[i] = start then FOrderPos := i;
+  end
+  else
+  begin
+    BuildShuffle(start, -1);
+    FOrderPos := 0;
+  end;
+  DebugLog(Format('resume: track %d %s at %.1f s, %s, order %s (%d tracks, order pos %d)',
+    [start + 1, FTracks[start].Path, pos, BoolToStr(FResPlaying, 'playing', 'paused'),
+     BoolToStr(exact, 'restored', BoolToStr(n = FCount, 'remapped', 'rebuilt')), FCount, FOrderPos]));
+
+  { 4. open it; if the saved position is at the very end, go on to the next track }
+  PlayIndex(start, 0, True);
+  if (FCur <> start) or not FStream then Exit;     { failed to open: PlayIndex moved on }
+  len := CurLen;
+  if (len > 0) and (pos >= len - 2) then
+  begin
+    DebugLog(Format('resume: position %.1f s is at the end (%.1f s): next track', [pos, len]));
+    if FResPlaying then NextTrack(True)
+    else
+    begin
+      Inc(FOrderPos);
+      if FOrderPos >= FCount then FOrderPos := 0;
+      PlayIndex(FOrder[FOrderPos], 0, True);
+    end;
+  end
+  else
+  begin
+    { already open and paused at 0: seek, then start (no second open) }
+    if pos > 0 then nca_seek(pos);
+    if FResPlaying then
+    begin
+      nca_play();
+      FState := psPlaying;
+    end;
+    DebugLog(Format('resume: started at %.1f s (%s)', [CurPos, BoolToStr(FState = psPlaying, 'playing', 'paused')]));
+    InvalidateAll;
+  end;
+  if FCur >= 0 then
+  begin
+    for i := 0 to FCount - 1 do FTracks[i].Selected := False;
+    FFocus := FCur;
+    FTracks[FCur].Selected := True;
+    EnsureVisible(FCur);
+  end;
+  SetLength(FResOrder, 0);
+  SetLength(FLineMap, 0);
 end;
 
 end.

@@ -1,5 +1,12 @@
 # Changelog
 
+## 1.7.5 - 2026-10-10
+
+- Resume on launch: nc-amp reopens the last track at the saved position and continues playing automatically (a track that was paused at exit comes back paused at that position). The shuffle order continues where it left off.
+- The resume point is saved on exit, on every track or play-state change, every 30 s while playing, and when Windows logs off, shuts down or restarts, so a crash or a killed process still resumes close to where it stopped. Playlist and settings files are written atomically.
+- The current track is remembered by its path, so it survives playlist edits; if its file no longer exists, the next track in the order plays. A saved position within 2 s of the end starts the next track. If the playlist changed outside nc-amp, the shuffle order is rebuilt starting with the current track.
+- Files passed on the command line or to the running instance still take priority over resuming. With no output device at start-up, playback resumes at the saved position as soon as a device appears.
+
 ## 1.7.4 - 2026-10-10
 
 - "Add folders" now uses the modern Windows folder picker and lets you select several folders at once (Ctrl/Shift-click); every selected folder is added recursively, with the same shuffle and auto-play behaviour as before.
