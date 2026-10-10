@@ -309,12 +309,15 @@ static ma_decoder *g_dec = NULL;
 static volatile int g_state = NCA_STOPPED;
 /* track length in output (device-rate) frames, measured ONCE when the decoder is built; 0 = unknown.
    Never ask the decoder for its length while it plays: for an MP3 without a Xing/Info header
-   dr_mp3 answers by rescanning the whole file and then seeking back to where it was, and if that
-   seek-back fails (or lands elsewhere) the stream is left at an earlier spot while the decoder's
-   cursor - our playback position - keeps counting: the song repeats and the time runs past the
-   duration without the end ever being reached. */
+   dr_mp3 answers by rescanning the whole file and then seeking back to where it was. In the last
+   few frames of a file that seek-back fails (after a seek-table jump minimp3 must re-sync on
+   several consecutive frame headers, and a trailing APE/ID3v1 tag leaves too few), and the failed
+   seek has already reset dr_mp3's frame counter to 0. The next length query before any audio is
+   read then "restores" position 0 - successfully - so the song starts over while the decoder's
+   cursor, our playback position, keeps counting: the time runs past the duration and the end is
+   never reached (1.7.6 queried the length several times per repaint). */
 static ma_uint64 g_lenFrames = 0;
-static volatile int g_endReason = 0;   /* 1 = decoder hit EOF, 2 = known length reached (logged by nca_poll) */
+static volatile int g_endReason = 0;   /* 1 = decoder EOF, 2 = known length reached, 3 = seek to the end (logged by nca_poll) */
 static volatile double g_endPos = 0;
 static volatile float g_vol = 1.0f, g_pan = 0.0f;
 static float g_ring[RING]; static volatile LONG g_ringPos = 0;
@@ -716,8 +719,16 @@ NCA_API int nca_seek(double sec)
         if (g_lenFrames && t > g_lenFrames) t = g_lenFrames;
         ma_decoder_get_cursor_in_pcm_frames(g_dec, &was);
         ok = ma_decoder_seek_to_pcm_frame(g_dec, t) == MA_SUCCESS;
-        if (!ok) ma_decoder_seek_to_pcm_frame(g_dec, was);   /* keep stream and cursor in step */
         if (g_state == NCA_ENDED) g_state = NCA_PLAYING;
+        if (!ok) {
+            /* dr_mp3 cannot seek into the last few frames of some files (after a seek it must
+               re-sync on several consecutive frame headers, and near the end there are too few).
+               A failed seek leaves the stream somewhere else: treat a seek to the end as the end,
+               otherwise go back to where we were so stream and cursor stay in step */
+            if (g_lenFrames && t + g_dec->outputSampleRate >= g_lenFrames) {
+                if (g_state == NCA_PLAYING) { g_state = NCA_ENDED; g_endReason = 3; g_endPos = (double)t / g_dec->outputSampleRate; }
+            } else ma_decoder_seek_to_pcm_frame(g_dec, was);
+        }
     }
     ma_mutex_unlock(&g_lock);
     return ok;
@@ -844,7 +855,12 @@ static void nca_reopen(const char *why)
             t = (ma_uint64)(posSec * g_dev.sampleRate);
             if (outLen && t > outLen) t = outLen;
             ma_decoder_seek_to_pcm_frame(d, 0);
-            if (t) ma_decoder_seek_to_pcm_frame(d, t);
+            if (t && ma_decoder_seek_to_pcm_frame(d, t) != MA_SUCCESS) {
+                /* could not get back there (see nca_seek): near the end, the track is over */
+                ma_decoder_seek_to_pcm_frame(d, 0);
+                if (outLen && t + g_dev.sampleRate >= outLen && st == NCA_PLAYING) { st = NCA_ENDED; g_endReason = 3; g_endPos = posSec; }
+                nca_log("decoder rebuild: seek to %.2f s failed", posSec);
+            }
             ma_mutex_lock(&g_lock); old = g_dec; g_dec = d; g_state = st; g_lenFrames = outLen; ma_mutex_unlock(&g_lock);
             if (old) { ma_decoder_uninit(old); free(old); }
             nca_log("decoder rebuilt for %u Hz, resumed at %.2f s (length %.2f s)", g_dev.sampleRate, posSec,
@@ -867,7 +883,7 @@ NCA_API void nca_poll(void)
     if (g_shuttingDown) return;
     if (g_endReason) {
         int r = g_endReason; g_endReason = 0;
-        nca_log("end of stream at %.2f s (%s)", g_endPos, r == 2 ? "known length reached" : "decoder EOF");
+        nca_log("end of stream at %.2f s (%s)", g_endPos, r == 3 ? "seek to the end" : r == 2 ? "known length reached" : "decoder EOF");
     }
     if (!g_pollEnabled) return;
     if (!g_devOk) {              /* a reopen failed earlier: retry every 2 s */
