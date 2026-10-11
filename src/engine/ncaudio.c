@@ -304,7 +304,12 @@ enum { NCA_STOPPED = 0, NCA_PLAYING = 1, NCA_PAUSED = 2, NCA_ENDED = 3 };
 
 #define RING 4096
 static ma_device g_dev; static int g_devOk = 0, g_lockOk = 0;
-static ma_mutex g_lock;
+/* decoder / play state lock. Held only for short decoder work and pointer swaps - never across a
+   device lifecycle call - and the audio callback only tries it (see nca_cb_lock) */
+static CRITICAL_SECTION g_cs;
+static volatile unsigned g_decGen = 0;        /* bumped by nca_open / nca_close: a rebuild in flight is stale */
+static volatile ma_uint32 g_devRate = 0;      /* sample rate of the open device, 0 = none (set by the engine thread) */
+static volatile LONG g_cbBusy = 0;            /* callbacks that found the lock busy and played silence */
 static ma_decoder *g_dec = NULL;
 static volatile int g_state = NCA_STOPPED;
 /* track length in output (device-rate) frames, measured ONCE when the decoder is built; 0 = unknown.
@@ -324,27 +329,57 @@ static float g_ring[RING]; static volatile LONG g_ringPos = 0;
 static char g_err[256] = "";
 static ma_decoding_backend_vtable *g_backends[3];
 static volatile float g_peakOut = 0; static volatile LONG g_cbCount = 0, g_cbFrames = 0, g_cbTotal = 0;
-static volatile int g_reopening = 0, g_devInited = 0, g_pollEnabled = 0;
+static volatile int g_reopening = 0, g_devInited = 0;
 static volatile int g_needRestart = 0, g_needDescribe = 0, g_shuttingDown = 0;
 static wchar_t g_path[MAX_PATH * 4];
 static WCHAR g_openId[512];   /* default render endpoint id when the device was opened ("" = none / unknown) */
 /* auto-pause on a real output-device change (1.7.8) */
 #define NCA_BURST_MS 3000           /* changes this soon after an auto-pause belong to it (BT HFP -> A2DP) */
 static ULONGLONG g_lastAutoPause = 0;  /* when the last auto-pause happened; only a new auto-pause moves it */
-static volatile int g_autoPaused = 0;
+static volatile LONG g_autoPaused = 0;
 static char g_autoWhy[600];
 /* NCAMP_TEST_DEVICE hooks: simulated default endpoint (g_testDefOn), forced device rate, no device until */
 static int g_testMode = -1, g_testDefOn = 0, g_testRate = 0, g_testStuck = 0;
+static volatile DWORD g_testHangMs = 0;   /* test "hang": the next device close blocks this long in the "driver" */
 static WCHAR g_testDef[64];
 static ULONGLONG g_testNoDevUntil = 0;
+static volatile int g_testFailWrite = 0;   /* next device write fails: the worker stops on its own */
+static HANDLE g_testRouteEv = NULL;      /* NCAMP_TEST_ROUTING: wakes nca_test_router on default changes */
+static DWORD WINAPI nca_test_router(LPVOID unused);
 static void nca_test_init(void);
+static void nca_test_device_opened(void);
+/* Device lifecycle (2.0.1): ma_device_init / start / stop / uninit run only on the engine thread
+   (nca_engine_thread), never on the UI thread and never from miniaudio's callbacks or
+   notifications, which only set flags. miniaudio's own automatic stream routing is off: on
+   WASAPI it stopped, re-initialised and restarted the device from its COM notification thread,
+   concurrently with our reopen of the same ma_device - see nca_device_close. */
+static DWORD g_ownerThread = 0;
+static int g_autoRouting = 0;           /* miniaudio's automatic stream routing on (never, since 2.0.1) */
+/* the engine thread (2.0.1): every device lifecycle call and the endpoint polling run here, so the
+   UI thread never waits for a device - a device operation that hangs in the driver cannot freeze
+   the window. The UI only posts requests (flags), reads state and logs. */
+static HANDLE g_engThread = NULL, g_engWake = NULL, g_engReady = NULL;
+static volatile LONG g_engQuit = 0;
+static volatile ULONGLONG g_opSince = 0;      /* start of the device operation in progress (watchdog), 0 = none */
+static const char *volatile g_opName = "";
+static void nca_op(const char *name) { g_opName = name; g_opSince = name ? GetTickCount64() : 0; }
 static char g_log[16384]; static CRITICAL_SECTION g_logCs; static int g_logCsOk = 0;
+
+/* The audio callback must never wait for long: if the lock stays busy for ~5 ms (a seek in a slow
+   file, say) this period is played as silence instead of stalling miniaudio's worker thread */
+static int nca_cb_lock(void)
+{
+    int i;
+    for (i = 0; i < 64; i++) { if (TryEnterCriticalSection(&g_cs)) return 1; SwitchToThread(); }
+    for (i = 0; i < 4; i++) { Sleep(1); if (TryEnterCriticalSection(&g_cs)) return 1; }
+    return 0;
+}
 
 static void cb(ma_device *dev, void *out, const void *in, ma_uint32 frames)
 {
     float *o = (float*)out; ma_uint64 got = 0; ma_uint32 i; float gl, gr, v;
     (void)in; (void)dev;
-    ma_mutex_lock(&g_lock);
+    if (!nca_cb_lock()) { InterlockedIncrement(&g_cbBusy); memset(o, 0, (size_t)frames * 2 * sizeof(float)); return; }
     if (g_dec && g_state == NCA_PLAYING) {
         ma_uint64 want = frames, cur = 0;
         if (g_lenFrames) {        /* never play past the known length */
@@ -358,7 +393,7 @@ static void cb(ma_device *dev, void *out, const void *in, ma_uint32 frames)
             g_endPos = g_dec->outputSampleRate ? (double)(cur + got) / g_dec->outputSampleRate : 0;
         }
     }
-    ma_mutex_unlock(&g_lock);
+    LeaveCriticalSection(&g_cs);
     if (got < frames) memset(o + got * 2, 0, (size_t)(frames - got) * 2 * sizeof(float));
     {   /* spectrum tap (pre-volume, mono) */
         LONG p = g_ringPos;
@@ -457,14 +492,15 @@ NCA_API const char *nca_error(void) { return g_err; }
 static void nca_setup(void)
 {
     if (!g_logCsOk) { InitializeCriticalSection(&g_logCs); g_logCsOk = 1; }
-    if (!g_lockOk) { ma_mutex_init(&g_lock); g_lockOk = 1; }
+    if (!g_lockOk) { InitializeCriticalSection(&g_cs); g_lockOk = 1; }
     g_backends[0] = &g_nca_vb_backend;
     g_backends[1] = ma_decoding_backend_libopus;
     g_backends[2] = &g_nca_mf_backend;
 }
 
 /* open + start the playback device on the *current default* endpoint (pDeviceID = NULL,
-   WASAPI first, automatic stream routing left on) */
+   WASAPI first). miniaudio's automatic stream routing is off; nca_poll follows the default
+   endpoint itself and reopens the device. */
 static int nca_device_open(void)
 {
     ma_device_config dc = ma_device_config_init(ma_device_type_playback);
@@ -478,35 +514,72 @@ static int nca_device_open(void)
     dc.dataCallback = cb;
     dc.notificationCallback = nca_notify;
     dc.performanceProfile = ma_performance_profile_conservative;
-    dc.wasapi.noAutoStreamRouting = MA_FALSE;
+    dc.wasapi.noAutoStreamRouting = MA_TRUE;
+    g_autoRouting = !dc.wasapi.noAutoStreamRouting;
     r = ma_device_init(NULL, &dc, &g_dev);
     if (r != MA_SUCCESS) { snprintf(g_err, sizeof g_err, "no audio output device (%s)", ma_result_description(r)); nca_log("%s", g_err); return 0; }
+    nca_test_device_opened();
     r = ma_device_start(&g_dev);
     if (r != MA_SUCCESS) { ma_device_uninit(&g_dev); snprintf(g_err, sizeof g_err, "cannot start audio device (%s)", ma_result_description(r)); nca_log("%s", g_err); return 0; }
     return 1;
 }
 
+/* Tear the playback device down (owner thread only). 1 = closed, 0 = not now, retry later.
+   When a device fails (WASAPI: device invalidated, e.g. earbuds gone) miniaudio's worker thread
+   leaves its loop on its own, posts the "stopped" notification and only then sets the state to
+   stopped (ma_worker_thread). ma_device_uninit() sets the state to uninitialized without taking
+   any lock: called in that window, the worker overwrites "uninitialized" with "stopped", wakes up
+   on uninit's signal and fails MA_ASSERT(ma_device_get_state(pDevice) == ma_device_state_starting)
+   - or, with assertions off, starts a device that is being destroyed while uninit waits for the
+   thread. ma_device_stop() takes the device's start/stop lock and waits until the worker has
+   really stopped, so the uninit after it is safe. A device caught starting or stopping (which
+   only another thread could cause) is left alone and closed on a later poll. */
+static int nca_device_close(int shutdown)
+{
+    ma_device_state st;
+    if (!g_devInited) return 1;
+    if (g_ownerThread && GetCurrentThreadId() != g_ownerThread) { nca_log("device close from a foreign thread refused"); return 0; }
+    st = ma_device_get_state(&g_dev);
+    if (!shutdown && (st == ma_device_state_starting || st == ma_device_state_stopping)) {
+        nca_log("device busy (state %d), closing it later", (int)st);
+        return 0;
+    }
+    if (g_testHangMs) { DWORD ms = g_testHangMs; g_testHangMs = 0; nca_log("TEST: device stop blocks for %lu ms", (unsigned long)ms); Sleep(ms); }
+    ma_device_stop(&g_dev);
+    ma_device_uninit(&g_dev);
+    g_devInited = 0;
+    return 1;
+}
+
 static void nca_remember_endpoint(void);
 
+static DWORD WINAPI nca_engine_thread(LPVOID unused);
+
+/* starts the engine thread and waits (at most 3 s) for its first attempt to open the device:
+   1 = a device is open. Without one, the engine thread keeps retrying. */
 NCA_API int nca_init(void)
 {
     nca_setup();
     nca_test_init();
-    if (g_devOk) return 1;
-    g_pollEnabled = 1;                  /* even without a device: nca_poll keeps retrying */
-    if (!nca_device_open()) return 0;
-    g_devInited = 1; g_devOk = 1;
-    nca_remember_endpoint();
-    nca_describe();
-    return 1;
+    if (g_engThread) return g_devOk;
+    g_engWake = CreateEventA(NULL, FALSE, FALSE, NULL);
+    g_engReady = CreateEventA(NULL, TRUE, FALSE, NULL);
+    g_engThread = CreateThread(NULL, 0, nca_engine_thread, NULL, 0, NULL);
+    if (!g_engThread) { snprintf(g_err, sizeof g_err, "cannot start the audio engine thread"); return 0; }
+    if (WaitForSingleObject(g_engReady, 3000) != WAIT_OBJECT_0) {
+        nca_log("audio device still opening after 3 s, continuing (the engine thread keeps going)");
+        snprintf(g_err, sizeof g_err, "audio device not ready yet");
+        return 0;
+    }
+    return g_devOk;
 }
 
-NCA_API int nca_device_rate(void) { return g_devOk ? (int)g_dev.sampleRate : 0; }
+NCA_API int nca_device_rate(void) { return (int)g_devRate; }
 
 static ma_decoder_config nca_cfg(int forPlayback)
 {
     ma_decoder_config c = ma_decoder_config_init(forPlayback ? ma_format_f32 : ma_format_unknown,
-                                                 forPlayback ? 2 : 0, forPlayback && g_devOk ? g_dev.sampleRate : 0);
+                                                 forPlayback ? 2 : 0, forPlayback ? g_devRate : 0);
     c.ppCustomBackendVTables = g_backends;
     c.customBackendCount = 3;
     c.seekPointCount = forPlayback ? 4096 : 0;      /* fast, accurate MP3 seeking */
@@ -664,12 +737,12 @@ NCA_API int nca_open(const wchar_t *path, nca_info *info)
         ma_uint32 sr = 0; ma_uint64 srcLen = nca_src_len(d, &sr), outLen = nca_out_len(d, srcLen, sr);
         ma_decoder_seek_to_pcm_frame(d, 0);   /* the length scan must leave the stream at the start */
         if (info) nca_fill_info(d, path, info, srcLen);
-        ma_mutex_lock(&g_lock);
+        EnterCriticalSection(&g_cs);
         g_lenFrames = outLen; g_endReason = 0;
     }
-    old = g_dec; g_dec = d; g_state = NCA_STOPPED;
+    old = g_dec; g_dec = d; g_state = NCA_STOPPED; g_decGen++;
     wcsncpy(g_path, path, MAX_PATH * 4 - 1); g_path[MAX_PATH * 4 - 1] = 0;
-    ma_mutex_unlock(&g_lock);
+    LeaveCriticalSection(&g_cs);
     if (old) { ma_decoder_uninit(old); free(old); }
     return 1;
 }
@@ -678,18 +751,18 @@ NCA_API void nca_close(void)
 {
     ma_decoder *old;
     if (!g_lockOk) return;
-    ma_mutex_lock(&g_lock); old = g_dec; g_dec = NULL; g_state = NCA_STOPPED; g_lenFrames = 0; ma_mutex_unlock(&g_lock);
+    EnterCriticalSection(&g_cs); old = g_dec; g_dec = NULL; g_state = NCA_STOPPED; g_lenFrames = 0; g_decGen++; LeaveCriticalSection(&g_cs);
     if (old) { ma_decoder_uninit(old); free(old); }
 }
 
-NCA_API void nca_play(void)  { if (!g_lockOk) return; ma_mutex_lock(&g_lock); if (g_dec) g_state = NCA_PLAYING; ma_mutex_unlock(&g_lock); }
-NCA_API void nca_pause(void) { if (!g_lockOk) return; ma_mutex_lock(&g_lock); if (g_state == NCA_PLAYING) g_state = NCA_PAUSED; ma_mutex_unlock(&g_lock); }
+NCA_API void nca_play(void)  { if (!g_lockOk) return; EnterCriticalSection(&g_cs); if (g_dec) g_state = NCA_PLAYING; LeaveCriticalSection(&g_cs); }
+NCA_API void nca_pause(void) { if (!g_lockOk) return; EnterCriticalSection(&g_cs); if (g_state == NCA_PLAYING) g_state = NCA_PAUSED; LeaveCriticalSection(&g_cs); }
 NCA_API void nca_stop(void)
 {
     if (!g_lockOk) return;
-    ma_mutex_lock(&g_lock);
+    EnterCriticalSection(&g_cs);
     if (g_dec) { g_state = NCA_STOPPED; ma_decoder_seek_to_pcm_frame(g_dec, 0); }
-    ma_mutex_unlock(&g_lock);
+    LeaveCriticalSection(&g_cs);
 }
 NCA_API int nca_state(void) { return g_state; }
 
@@ -697,12 +770,12 @@ NCA_API double nca_get_pos(void)
 {
     ma_uint64 c = 0; double r = 0;
     if (!g_lockOk) return 0;
-    ma_mutex_lock(&g_lock);
+    EnterCriticalSection(&g_cs);
     if (g_dec && ma_decoder_get_cursor_in_pcm_frames(g_dec, &c) == MA_SUCCESS && g_dec->outputSampleRate) {
         if (g_lenFrames && c > g_lenFrames) c = g_lenFrames;   /* the position never exceeds the length */
         r = (double)c / g_dec->outputSampleRate;
     }
-    ma_mutex_unlock(&g_lock);
+    LeaveCriticalSection(&g_cs);
     return r;
 }
 
@@ -711,9 +784,9 @@ NCA_API double nca_get_len(void)
 {
     double r = 0;
     if (!g_lockOk) return 0;
-    ma_mutex_lock(&g_lock);
+    EnterCriticalSection(&g_cs);
     if (g_dec && g_lenFrames && g_dec->outputSampleRate) r = (double)g_lenFrames / g_dec->outputSampleRate;
-    ma_mutex_unlock(&g_lock);
+    LeaveCriticalSection(&g_cs);
     return r;
 }
 
@@ -722,7 +795,7 @@ NCA_API int nca_seek(double sec)
     int ok = 0;
     if (!g_lockOk) return 0;
     if (sec < 0) sec = 0;
-    ma_mutex_lock(&g_lock);
+    EnterCriticalSection(&g_cs);
     if (g_dec) {
         ma_uint64 t = (ma_uint64)(sec * g_dec->outputSampleRate), was = 0;
         if (g_lenFrames && t > g_lenFrames) t = g_lenFrames;
@@ -739,7 +812,7 @@ NCA_API int nca_seek(double sec)
             } else ma_decoder_seek_to_pcm_frame(g_dec, was);
         }
     }
-    ma_mutex_unlock(&g_lock);
+    LeaveCriticalSection(&g_cs);
     return ok;
 }
 
@@ -796,8 +869,13 @@ NCA_API void nca_uninit(void)
 {
     g_shuttingDown = 1;
     nca_close();
-    if (g_devInited) { ma_device_uninit(&g_dev); g_devInited = 0; } g_devOk = 0;
-    if (g_mfStarted) { pMFShutdown(); g_mfStarted = 0; }
+    if (g_engThread) {
+        InterlockedExchange(&g_engQuit, 1); SetEvent(g_engWake);
+        if (WaitForSingleObject(g_engThread, 2000) != WAIT_OBJECT_0)
+            nca_log("audio engine thread did not finish within 2 s (device operation '%s'), exiting anyway", g_opName);
+        else { CloseHandle(g_engThread); g_engThread = NULL; }
+    }
+    if (g_mfStarted && !g_engThread) { pMFShutdown(); g_mfStarted = 0; }
 }
 
 /* ------------------------------------------------------------------ */
@@ -864,13 +942,13 @@ static void nca_endpoint_check(const WCHAR *oldId, const WCHAR *newId, const cha
                 (double)(now - g_lastAutoPause) / 1000.0);
         return;
     }
-    ma_mutex_lock(&g_lock);
+    EnterCriticalSection(&g_cs);
     if (g_dec && g_state == NCA_PLAYING) { g_state = NCA_PAUSED; paused = 1; }
-    ma_mutex_unlock(&g_lock);
+    LeaveCriticalSection(&g_cs);
     if (paused) {
         g_lastAutoPause = now;
         snprintf(g_autoWhy, sizeof g_autoWhy, "output device changed (%s): %ls -> %ls", why, oldId, nw);
-        g_autoPaused = 1;
+        InterlockedExchange(&g_autoPaused, 1);
         nca_log("auto-pause: %s", g_autoWhy);
     } else nca_log("device change %ls -> %ls (%s): not playing, switched silently", oldId, nw, why);
 }
@@ -878,57 +956,81 @@ static void nca_endpoint_check(const WCHAR *oldId, const WCHAR *newId, const cha
 /* the UI asks after every nca_poll: 1 = playback was paused because the device changed */
 NCA_API int nca_take_autopause(char *buf, int cap)
 {
-    if (!g_autoPaused) return 0;
-    g_autoPaused = 0;
+    if (!InterlockedExchange(&g_autoPaused, 0)) return 0;
     if (buf && cap > 0) { strncpy(buf, g_autoWhy, cap - 1); buf[cap - 1] = 0; }
     return 1;
 }
 
 /* tear the device down and open it again on the current default endpoint, keeping the
    track, its position and the play state (except for an auto-pause, see above) */
+/* The decoder resamples to the device rate: when the device came back at another rate, build a
+   new decoder for it at the same position (engine thread; the decoder lock is held only to read
+   the state and to swap). A track opened, closed or seeked by the UI meanwhile wins. */
+static void nca_rebuild_decoder(void)
+{
+    static wchar_t path[MAX_PATH * 4];
+    ma_decoder *d, *old; ma_decoder_config cfg; unsigned gen; ma_uint32 rate = g_devRate, sr = 0;
+    ma_uint64 c = 0, srcLen, outLen, t; double posSec = 0;
+    EnterCriticalSection(&g_cs);
+    if (!g_dec || !g_path[0] || !rate || g_dec->outputSampleRate == rate) { LeaveCriticalSection(&g_cs); return; }
+    gen = g_decGen; wcscpy(path, g_path);
+    if (ma_decoder_get_cursor_in_pcm_frames(g_dec, &c) == MA_SUCCESS && g_dec->outputSampleRate) posSec = (double)c / g_dec->outputSampleRate;
+    LeaveCriticalSection(&g_cs);
+    d = (ma_decoder*)malloc(sizeof(ma_decoder)); if (!d) return;
+    cfg = nca_cfg(1);
+    if (ma_decoder_init_file_w(path, &cfg, d) != MA_SUCCESS) { free(d); nca_log("decoder rebuild for %u Hz failed", rate); return; }
+    srcLen = nca_src_len(d, &sr); outLen = nca_out_len(d, srcLen, sr);
+    ma_decoder_seek_to_pcm_frame(d, 0);
+    EnterCriticalSection(&g_cs);
+    if (gen != g_decGen || !g_dec) { LeaveCriticalSection(&g_cs); ma_decoder_uninit(d); free(d); nca_log("decoder rebuild dropped: the track changed meanwhile"); return; }
+    /* the position now (it moved on, or the listener seeked, while the new decoder was built) */
+    if (ma_decoder_get_cursor_in_pcm_frames(g_dec, &c) == MA_SUCCESS && g_dec->outputSampleRate) posSec = (double)c / g_dec->outputSampleRate;
+    t = (ma_uint64)(posSec * rate);
+    if (outLen && t > outLen) t = outLen;
+    if (t && ma_decoder_seek_to_pcm_frame(d, t) != MA_SUCCESS) {
+        /* could not get back there (see nca_seek): near the end, the track is over */
+        ma_decoder_seek_to_pcm_frame(d, 0);
+        if (outLen && t + rate >= outLen && g_state == NCA_PLAYING) { g_state = NCA_ENDED; g_endReason = 3; g_endPos = posSec; }
+        nca_log("decoder rebuild: seek to %.2f s failed", posSec);
+    }
+    old = g_dec; g_dec = d; g_lenFrames = outLen;        /* the play state stays as it is now */
+    LeaveCriticalSection(&g_cs);
+    ma_decoder_uninit(old); free(old);
+    nca_log("decoder rebuilt for %u Hz, resumed at %.2f s (length %.2f s)", rate, posSec, outLen ? (double)outLen / rate : 0.0);
+}
+
+/* (engine thread) open the device on the current default endpoint; 1 = ok */
+static int nca_device_start_up(void)
+{
+    nca_op("open");
+    if (!nca_device_open()) { nca_op(NULL); return 0; }
+    nca_op(NULL);
+    g_devInited = 1; g_devOk = 1; g_devRate = g_dev.sampleRate;
+    return 1;
+}
+
+/* (engine thread) tear the device down and open it again on the current default endpoint, keeping
+   the track, its position and the play state (except for an auto-pause, see above) */
 static void nca_reopen(const char *why)
 {
-    WCHAR oldId[512];
+    WCHAR oldId[512]; int closed;
+    if (g_ownerThread && GetCurrentThreadId() != g_ownerThread) { nca_log("reopen from a foreign thread refused"); return; }
     wcscpy(oldId, g_openId);
     nca_log("reopening audio device: %s", why);
     g_reopening = 1;
-    if (g_devInited) { ma_device_uninit(&g_dev); g_devInited = 0; }
-    g_devOk = 0;
-    if (!nca_device_open()) {
+    nca_op("close"); closed = nca_device_close(0); nca_op(NULL);
+    if (!closed) { g_reopening = 0; g_needRestart = 1; return; }
+    g_devOk = 0; g_devRate = 0;
+    if (!nca_device_start_up()) {
         g_reopening = 0; nca_log("reopen failed, will retry in 2 s");
         g_openId[0] = 0;                /* no device now */
         nca_endpoint_check(oldId, L"", why);
         return;
     }
-    g_devInited = 1; g_devOk = 1;
     g_reopening = 0;
     nca_remember_endpoint();
     nca_endpoint_check(oldId, g_openId, why);   /* before a rebuild, which keeps the (paused) state */
-    if (g_dec && g_path[0] && g_dec->outputSampleRate != g_dev.sampleRate) {
-        /* the decoder resamples to the device rate: rebuild it at the new rate, same position */
-        ma_decoder *d = (ma_decoder*)malloc(sizeof(ma_decoder)), *old; ma_decoder_config cfg = nca_cfg(1);
-        double posSec = 0; ma_uint64 c = 0; int st;
-        ma_mutex_lock(&g_lock);
-        if (ma_decoder_get_cursor_in_pcm_frames(g_dec, &c) == MA_SUCCESS && g_dec->outputSampleRate) posSec = (double)c / g_dec->outputSampleRate;
-        st = g_state;
-        ma_mutex_unlock(&g_lock);
-        if (d && ma_decoder_init_file_w(g_path, &cfg, d) == MA_SUCCESS) {
-            ma_uint32 sr = 0; ma_uint64 srcLen = nca_src_len(d, &sr), outLen = nca_out_len(d, srcLen, sr), t;
-            t = (ma_uint64)(posSec * g_dev.sampleRate);
-            if (outLen && t > outLen) t = outLen;
-            ma_decoder_seek_to_pcm_frame(d, 0);
-            if (t && ma_decoder_seek_to_pcm_frame(d, t) != MA_SUCCESS) {
-                /* could not get back there (see nca_seek): near the end, the track is over */
-                ma_decoder_seek_to_pcm_frame(d, 0);
-                if (outLen && t + g_dev.sampleRate >= outLen && st == NCA_PLAYING) { st = NCA_ENDED; g_endReason = 3; g_endPos = posSec; }
-                nca_log("decoder rebuild: seek to %.2f s failed", posSec);
-            }
-            ma_mutex_lock(&g_lock); old = g_dec; g_dec = d; g_state = st; g_lenFrames = outLen; ma_mutex_unlock(&g_lock);
-            if (old) { ma_decoder_uninit(old); free(old); }
-            nca_log("decoder rebuilt for %u Hz, resumed at %.2f s (length %.2f s)", g_dev.sampleRate, posSec,
-                    outLen ? (double)outLen / g_dev.sampleRate : 0.0);
-        } else free(d);
-    }
+    nca_rebuild_decoder();
     nca_describe();
 }
 
@@ -947,17 +1049,91 @@ static void nca_test_init(void)
     if (g_testMode >= 0) return;
     GetEnvironmentVariableA("NCAMP_TEST_DEVICE", v, sizeof v);
     g_testMode = !strcmp(v, "stop") ? 1 : !strcmp(v, "reopen") ? 2 : !strcmp(v, "nodev") ? 4 : !strcmp(v, "change") ? 5 :
-                 !strcmp(v, "remove") ? 6 : !strcmp(v, "stuck") ? 7 : !strcmp(v, "rate") ? 8 : !strcmp(v, "reroute") ? 9 : !strcmp(v, "repeat") ? 10 : 0;
+                 !strcmp(v, "remove") ? 6 : !strcmp(v, "stuck") ? 7 : !strcmp(v, "rate") ? 8 : !strcmp(v, "reroute") ? 9 : !strcmp(v, "repeat") ? 10 : !strcmp(v, "stress") ? 11 : !strcmp(v, "hang") ? 12 : 0;
     if (g_testMode == 4) g_testNoDevUntil = GetTickCount64() + 6000;
+    if (g_testMode == 11) {
+        char r[4] = "";
+        GetEnvironmentVariableA("NCAMP_TEST_ROUTING", r, sizeof r);
+        if (r[0] == '1') { g_testRouteEv = CreateEventA(NULL, FALSE, FALSE, NULL); CloseHandle(CreateThread(NULL, 0, nca_test_router, NULL, 0, NULL)); }
+    }
     if (g_testMode == 1 || g_testMode >= 5) { g_testDefOn = 1; wcscpy(g_testDef, g_testMode == 6 ? L"{TEST}.{earbuds}" : L"{TEST}.{speakers}"); }
 }
 
-static void nca_test_set(const WCHAR *id) { g_testDefOn = 1; wcscpy(g_testDef, id); }
+static void nca_test_set(const WCHAR *id)
+{
+    g_testDefOn = 1; wcscpy(g_testDef, id);
+    if (g_testRouteEv) SetEvent(g_testRouteEv);
+}
+
+/* the device's write fails once (like WASAPI after the endpoint is gone): miniaudio's worker
+   stops the device by itself and posts "stopped" - the path real device loss takes */
+static ma_result (*g_testOrigWrite)(ma_device*, const void*, ma_uint32, ma_uint32*) = NULL;
+static ma_result nca_test_write(ma_device *d, const void *p, ma_uint32 n, ma_uint32 *w)
+{
+    if (g_testFailWrite) { g_testFailWrite = 0; return MA_ERROR; }
+    return g_testOrigWrite(d, p, n, w);
+}
+static void nca_test_device_opened(void)
+{
+    if (g_testMode <= 0 || !g_dev.pContext->callbacks.onDeviceWrite) return;
+    if (g_dev.pContext->callbacks.onDeviceWrite != nca_test_write) {
+        g_testOrigWrite = g_dev.pContext->callbacks.onDeviceWrite;
+        g_dev.pContext->callbacks.onDeviceWrite = nca_test_write;
+    }
+}
+
+/* NCAMP_TEST_ROUTING=1 (with stress): does to g_dev what miniaudio's WASAPI notification thread
+   does on a default-device change when automatic stream routing is on - stop, restart, post
+   "rerouted" - from its own thread. Only acts while routing is on, which 2.0.0 had and 2.0.1
+   does not: it reproduces the 2.0.0 race. */
+static DWORD WINAPI nca_test_router(LPVOID unused)
+{
+    (void)unused;
+    for (;;) {
+        WaitForSingleObject(g_testRouteEv, INFINITE);
+        if (g_shuttingDown) break;
+        if (!g_autoRouting || !g_devInited) continue;
+        if (ma_device_get_state(&g_dev) == ma_device_state_started) {
+            ma_device_stop(&g_dev);
+            Sleep(1);
+            ma_device_start(&g_dev);
+        }
+        g_needDescribe = 1;
+    }
+    return 0;
+}
 
 static void nca_test_step(ULONGLONG t, int *step)
 {
     int m = g_testMode;
     if (m <= 0 || m == 4) return;
+    if (m == 11) {  /* stress: random device events every 60-700 ms, Play pressed again after each auto-pause */
+        static ULONGLONG next = 0, lastStat = 0; static unsigned seed = 12345, n = 0, k[7];
+        static const WCHAR *ids[] = { L"{TEST}.{speakers}", L"{TEST}.{earbuds-hfp}", L"{TEST}.{earbuds-a2dp}" };
+        unsigned r;
+        if (t < 3000) return;
+        if (t >= next) {
+            seed = seed * 1103515245u + 12345u; r = (seed >> 8) % 1000;
+            next = t + 60 + (r * 7 % 640);
+            switch (r % 7) {
+            case 0: case 1: nca_test_set(ids[(r / 7) % 3]); break;                    /* default switches (bursts when close) */
+            case 2: nca_test_set(L""); g_testNoDevUntil = GetTickCount64() + 200 + r % 1300; g_testFailWrite = 1; break; /* endpoint gone */
+            case 3: g_testFailWrite = 1; break;                                       /* device fails, same endpoint */
+            case 4: g_needDescribe = 1; break;                                        /* "rerouted" */
+            case 5: g_testRate = g_testRate ? 0 : 44100; g_needRestart = 1; break;   /* comes back at another rate */
+            case 6: g_testStuck = 1; break;                                           /* callbacks stall */
+            }
+            k[r % 7]++; n++;
+            if (g_testDefOn && !g_testDef[0] && GetTickCount64() >= g_testNoDevUntil) nca_test_set(ids[0]);
+            if (g_state == NCA_PAUSED) nca_play();                                    /* the listener presses Play */
+        }
+        if (t - lastStat >= 10000) {
+            lastStat = t;
+            nca_log("TEST stress: %u events (switch %u, gone %u, fail %u, reroute %u, rate %u, stuck %u), device state %d",
+                    n, k[0] + k[1], k[2], k[3], k[4], k[5], k[6], g_devInited ? (int)ma_device_get_state(&g_dev) : -1);
+        }
+        return;
+    }
     if (m == 10) {  /* repeat: real changes again and again, Play pressed after each pause (by the tester) */
         static const struct { unsigned ms; int kind; const WCHAR *id; const char *what; } ev[] = {
             {  5000, 0, L"{TEST}.{earbuds-hfp}",  "earbuds out of the case (HFP): speakers -> earbuds" },
@@ -974,18 +1150,19 @@ static void nca_test_step(ULONGLONG t, int *step)
             nca_log("TEST: %s", ev[k].what);
             nca_test_set(ev[k].id);
             if (ev[k].kind == 1) g_needDescribe = 1;
-            if (ev[k].kind == 2) { g_testNoDevUntil = GetTickCount64() + 1500; ma_device_stop(&g_dev); }
+            if (ev[k].kind == 2) { g_testNoDevUntil = GetTickCount64() + 1500; g_testFailWrite = 1; }
         }
         return;
     }
     if (*step == 0 && t >= 5000) {
         (*step)++;
-        if (m == 1) { nca_log("TEST: simulating device stop"); ma_device_stop(&g_dev); }
+        if (m == 1) { nca_log("TEST: simulating device stop"); g_testFailWrite = 1; }
         if (m == 2) { nca_log("TEST: earbuds connected, become the default endpoint"); nca_test_set(L"{TEST}.{earbuds-1}"); }
         if (m == 5) { nca_log("TEST: earbuds connected (HFP), default speakers -> earbuds"); nca_test_set(L"{TEST}.{earbuds-hfp}"); }
-        if (m == 6) { nca_log("TEST: earbuds unplugged, no device for 4 s"); nca_test_set(L""); g_testNoDevUntil = GetTickCount64() + 4000; ma_device_stop(&g_dev); }
+        if (m == 6) { nca_log("TEST: earbuds unplugged, no device for 4 s"); nca_test_set(L""); g_testNoDevUntil = GetTickCount64() + 4000; g_testFailWrite = 1; }
         if (m == 7) { nca_log("TEST: callbacks stall"); g_testStuck = 1; }
         if (m == 8) { nca_log("TEST: same device comes back at 44100 Hz"); g_testRate = 44100; g_needRestart = 1; }
+        if (m == 12) { nca_log("TEST: device fails and its driver hangs in stop for 6 s"); g_testHangMs = 6000; g_testFailWrite = 1; }
         if (m == 9) { nca_log("TEST: miniaudio reroutes to new earbuds"); nca_test_set(L"{TEST}.{earbuds}"); g_needDescribe = 1; }
     }
     if (*step == 1 && t >= (m == 5 ? 6500u : 9000u) && (m == 5 || m == 6)) {
@@ -996,48 +1173,84 @@ static void nca_test_step(ULONGLONG t, int *step)
     if (*step == 1 && t >= 10000 && m == 2) { (*step)++; nca_log("TEST: default endpoint switched again"); nca_test_set(L"{TEST}.{earbuds-2}"); }
 }
 
-/* Called from the UI thread several times a second. */
-NCA_API void nca_poll(void)
+/* (engine thread) every 25 ms: follow the default endpoint, recover failed / stuck devices */
+static void nca_engine_tick(void)
 {
-    static ULONGLONG lastCheck = 0, t0 = 0; static LONG lastCb = 0; static int step = 0;
+    static ULONGLONG lastCheck = 0, lastEp = 0, t0 = 0; static LONG lastCb = 0; static int step = 0; static DWORD lastSt = DEVICE_STATE_ACTIVE;
     ULONGLONG now = GetTickCount64();
     if (!t0) t0 = now;
     if (g_shuttingDown) return;
-    if (g_endReason) {
-        int r = g_endReason; g_endReason = 0;
-        nca_log("end of stream at %.2f s (%s)", g_endPos, r == 3 ? "seek to the end" : r == 2 ? "known length reached" : "decoder EOF");
-    }
-    if (!g_pollEnabled) return;
     if (!g_devOk) {              /* a reopen failed earlier: retry every 2 s */
         if (now - lastCheck >= 2000) { lastCheck = now; nca_reopen("retry"); }
         return;
     }
     nca_test_step(now - t0, &step);
-    if (g_needDescribe) {        /* miniaudio followed the default device by itself (WASAPI stream routing) */
+    if (g_needDescribe) {        /* "rerouted" notification (miniaudio's stream routing is off since 2.0.1; kept to be safe) */
         WCHAR oldId[512];
         g_needDescribe = 0; wcscpy(oldId, g_openId);
         nca_log("rerouted by miniaudio"); nca_remember_endpoint();
         nca_endpoint_check(oldId, g_openId, "rerouted to the new default");
         nca_describe();
     }
-    if (g_needRestart) { g_needRestart = 0; nca_reopen("device stopped / interrupted"); lastCheck = now; return; }
-    if (now - lastCheck < 2000) return;
-    lastCheck = now;
-    if (ma_device_get_state(&g_dev) != ma_device_state_started) { nca_reopen("device not running"); return; }
-    {
+    if (g_needRestart) { g_needRestart = 0; nca_reopen("device stopped / interrupted"); lastCheck = lastEp = now; return; }
+    nca_rebuild_decoder();       /* a track opened by the UI while the device ran at another rate */
+    if (now - lastEp >= 500) {  /* follow the default endpoint (miniaudio's own stream routing is off) */
         WCHAR id[512]; DWORD st = 0;
+        lastEp = now;
         if (!g_openId[0] && nca_default_endpoint(id, 512, &st) && st == DEVICE_STATE_ACTIVE) {
             /* opened without a real endpoint (e.g. null backend) and one has appeared */
             nca_log("default endpoint appeared: %ls", id); nca_reopen("default endpoint appeared"); return;
         }
         if (g_openId[0] && nca_default_endpoint(id, 512, &st)) {
             if (wcscmp(id, g_openId) != 0) { nca_log("default endpoint changed: %ls -> %ls", g_openId, id); nca_reopen("default endpoint changed"); return; }
-            if (st != DEVICE_STATE_ACTIVE) { nca_log("default endpoint state=%lu", st); }
+            if (st != DEVICE_STATE_ACTIVE && st != lastSt) nca_log("default endpoint state=%lu", st);
+            lastSt = st;
         }
     }
+    if (now - lastCheck < 2000) return;
+    lastCheck = now;
+    if (ma_device_get_state(&g_dev) != ma_device_state_started) { nca_reopen("device not running"); return; }
     {   /* callbacks stalled although the device claims to run (stuck stream) */
         LONG cbs = g_cbTotal;
         if (cbs == lastCb || g_testStuck) { g_testStuck = 0; nca_reopen("no audio callbacks for 2 s"); lastCb = g_cbTotal; return; }
         lastCb = cbs;
+    }
+}
+
+static DWORD WINAPI nca_engine_thread(LPVOID unused)
+{
+    HRESULT ci = CoInitializeEx(NULL, COINIT_MULTITHREADED);
+    (void)unused;
+    g_ownerThread = GetCurrentThreadId();
+    if (nca_device_start_up()) { nca_remember_endpoint(); nca_describe(); }
+    SetEvent(g_engReady);
+    while (!g_engQuit) {
+        WaitForSingleObject(g_engWake, 25);
+        if (g_engQuit) break;
+        nca_engine_tick();
+    }
+    nca_op("close at exit"); nca_device_close(1); nca_op(NULL);
+    g_devOk = 0; g_devRate = 0;
+    if (ci == S_OK || ci == S_FALSE) CoUninitialize();
+    return 0;
+}
+
+/* Called from the UI thread several times a second. Never waits for the device: it only logs
+   what the engine noticed and watches the engine thread. */
+NCA_API void nca_poll(void)
+{
+    static ULONGLONG warned = 0; static LONG lastBusy = 0;
+    ULONGLONG since = g_opSince, now = GetTickCount64();
+    if (g_endReason) {
+        int r = g_endReason; g_endReason = 0;
+        nca_log("end of stream at %.2f s (%s)", g_endPos, r == 3 ? "seek to the end" : r == 2 ? "known length reached" : "decoder EOF");
+    }
+    if (since && now - since >= 3000 && since != warned) {
+        warned = since;
+        nca_log("watchdog: audio device operation '%s' has not finished after %.1f s (the player stays usable)", g_opName, (double)(now - since) / 1000.0);
+    }
+    if (g_cbBusy != lastBusy && now % 1000 < 30) {
+        nca_log("audio callback found the decoder busy %ld times (played silence)", g_cbBusy - lastBusy);
+        lastBusy = g_cbBusy;
     }
 }

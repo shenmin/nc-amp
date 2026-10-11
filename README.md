@@ -18,7 +18,7 @@ nc-amp - a native Free Pascal/Lazarus music player for Windows with a classic Wi
 - **Drop and play:** drop files or folders (scanned recursively) on either window; the list plays at once.
 - **Always shuffle + repeat:** every track plays once per round, then the list is reshuffled; a new round never starts with the track that just ended.
 - **Classic two-window layout:** gunmetal skin with a sage LCD, real-time FFT spectrum, seek, volume and balance, bitrate / sample rate / stereo readouts; separate playlist that docks, snaps and resizes.
-- **Shade mode** for both windows (slim bars with mini transport controls), pixel-aligned at every DPI.
+- **Shade mode** for both windows (slim bars with mini transport controls; the main bar also has a volume slider), pixel-aligned at every DPI.
 - **Per-monitor-v2 high DPI:** crisp at 100 % - 250 %, rescales when moved between monitors; extra size option 1x / 1.5x / 2x.
 - **Unicode everywhere:** Chinese file names and tags (ID3v1 GBK, ID3v2, Vorbis comments, MP4).
 - **Tray app:** no taskbar button; tray icon with native menu; single instance (opening files again hands them to the running copy).

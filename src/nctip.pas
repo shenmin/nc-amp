@@ -29,7 +29,7 @@ type
     FRects: array of TRect;
     FBg, FFg, FBorder: COLORREF;
     FPad, FBw, FTextW, FTextH, FInkTop, FInkH, FLineH, FInkLeft, FWrapW: Integer;
-    FShown, FBlocked: Boolean;
+    FShown, FBlocked, FFixed: Boolean;
     FHoverStart, FShownAt: QWord;
     FHoverPt, FAnchor: TPoint;
     FOnDraw: TNcTipDraw;
@@ -48,6 +48,10 @@ type
     procedure SetColors(Bg, Fg, Border: COLORREF);
     procedure Poll;
     procedure Hide;
+    { shown at once, without hover tracking (a value readout while a control is dragged):
+      centred under Anchor (screen px), or above it when there is no room below; Poll
+      leaves it alone until Hide }
+    procedure ShowFixed(const s: string; const Anchor: TRect);
     property Owner: HWND read FOwner;
     property Wnd: HWND read FWnd;
     property Shown: Boolean read FShown;
@@ -444,6 +448,40 @@ procedure TNcTip.Hide;
 begin
   if FShown and (FWnd <> 0) then ShowWindow(FWnd, SW_HIDE);
   FShown := False;
+  FFixed := False;
+end;
+
+procedure TNcTip.ShowFixed(const s: string; const Anchor: TRect);
+var
+  w, h, x, y, gap: Integer;
+  mi: TNcMonInfo;
+  wa: TRect;
+  t: UnicodeString;
+begin
+  if FWnd = 0 then Exit;
+  t := UTF8Decode(s);
+  if t = '' then begin Hide; Exit; end;
+  if (t <> FText) or not FFixed then begin FText := t; Measure; end;
+  FFixed := True;
+  w := FTextW + 2 * (FPad + FBw);
+  h := FTextH + 2 * (FPad + FBw);
+  gap := Round(3 * FDpi / 96);
+  x := (Anchor.Left + Anchor.Right - w) div 2;
+  y := Anchor.Bottom + gap;
+  mi.cbSize := SizeOf(mi);
+  if GetMonitorInfoW(MonitorFromPoint(Point((Anchor.Left + Anchor.Right) div 2, Anchor.Bottom), MONITOR_DEFAULTTONEAREST), mi) then
+  begin
+    wa := mi.rcWork;
+    if y + h > wa.Bottom then y := Anchor.Top - gap - h;   { flip above }
+    if x + w > wa.Right then x := wa.Right - w;
+    if x < wa.Left then x := wa.Left;
+    if y < wa.Top then y := wa.Top;
+  end;
+  SetWindowPos(FWnd, HWND_TOPMOST, x, y, w, h, SWP_NOACTIVATE or SWP_NOOWNERZORDER);
+  InvalidateRect(FWnd, nil, False);
+  if not FShown then ShowWindow(FWnd, SW_SHOWNOACTIVATE);
+  FShown := True;
+  FShownAt := GetTickCount64;
 end;
 
 procedure TNcTip.Poll;
@@ -452,7 +490,7 @@ var
   now: QWord;
   delay: UINT;
 begin
-  if FWnd = 0 then Exit;
+  if (FWnd = 0) or FFixed then Exit;
   if not GetCursorPos(pt) then Exit;
   now := GetTickCount64;
   if not InTool(pt) then

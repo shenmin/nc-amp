@@ -20,7 +20,12 @@ AR=x86_64-w64-mingw32-ar; OBJDUMP=x86_64-w64-mingw32-objdump
 #     Free Pascal's linker cannot merge across objects (internal error 200603061)
 #  -fno-reorder-blocks-and-partition: no separate .text.unlikely cold sections
 #  stack protector / fortify off (opus): nothing would initialise the stack guard
-ENGINE_CFLAGS="-mcmodel=small -fno-reorder-blocks-and-partition"
+#  -DNDEBUG, opus hardening off: no C runtime assertion (a modal "Assertion failed!" dialog from
+#     msvcrt) or abort() can come from the engine in a release build
+#  -ffile-prefix-map: no build-machine paths in the binary
+# NCAMP_ENGINE_ASSERTS=1 builds a test exe with the C assertions left on.
+ENGINE_CFLAGS="-mcmodel=small -fno-reorder-blocks-and-partition -ffile-prefix-map=$ROOT/=nc-amp/"
+if [ "${NCAMP_ENGINE_ASSERTS:-0}" = 1 ]; then echo "*** engine built WITH assertions (test build) ***"; else ENGINE_CFLAGS="$ENGINE_CFLAGS -DNDEBUG"; fi
 
 cat > "$B/mingw.cmake" <<EOT
 set(CMAKE_SYSTEM_NAME Windows)
@@ -31,21 +36,21 @@ set(CMAKE_FIND_ROOT_PATH_MODE_PROGRAM NEVER)
 set(CMAKE_C_FLAGS_INIT "$ENGINE_CFLAGS")
 EOT
 
-if [ ! -f "$P/lib/libogg.a" ] || [ ! -f "$P/lib/.static-engine" ]; then
+if [ ! -f "$P/lib/libogg.a" ] || [ ! -f "$P/lib/.static-engine-2.0.1" ]; then
   rm -rf "$B/libogg"
   cmake -S "$DEPS/libogg-1.3.5" -B "$B/libogg" -DCMAKE_TOOLCHAIN_FILE="$B/mingw.cmake" \
     -DCMAKE_BUILD_TYPE=Release -DBUILD_SHARED_LIBS=OFF -DINSTALL_DOCS=OFF -DBUILD_TESTING=OFF \
     -DCMAKE_INSTALL_PREFIX="$P"
   cmake --build "$B/libogg" -j"$(nproc)" && cmake --install "$B/libogg"
 fi
-if [ ! -f "$P/lib/libopus.a" ] || [ ! -f "$P/lib/.static-engine" ]; then
+if [ ! -f "$P/lib/libopus.a" ] || [ ! -f "$P/lib/.static-engine-2.0.1" ]; then
   rm -rf "$B/opus"
   cmake -S "$DEPS/opus-1.5.2" -B "$B/opus" -DCMAKE_TOOLCHAIN_FILE="$B/mingw.cmake" \
     -DCMAKE_BUILD_TYPE=Release -DOPUS_BUILD_SHARED_LIBRARY=OFF -DOPUS_BUILD_TESTING=OFF \
     -DOPUS_BUILD_PROGRAMS=OFF -DOPUS_DRED=OFF -DOPUS_OSCE=OFF \
-    -DOPUS_STACK_PROTECTOR=OFF -DOPUS_FORTIFY_SOURCE=OFF -DCMAKE_INSTALL_PREFIX="$P"
+    -DOPUS_STACK_PROTECTOR=OFF -DOPUS_FORTIFY_SOURCE=OFF -DOPUS_HARDENING=OFF -DCMAKE_INSTALL_PREFIX="$P"
   cmake --build "$B/opus" -j"$(nproc)" && cmake --install "$B/opus"
-  touch "$P/lib/.static-engine"
+  touch "$P/lib/.static-engine-2.0.1"
 fi
 
 O="$DEPS/opusfile-0.12"
@@ -94,5 +99,13 @@ if [ -n "$DUPS" ]; then echo "engine symbols defined more than once: $DUPS" >&2;
 # no MinGW start-up code runs in nc-amp.exe: refuse constructors, CRT init lists and TLS data
 INIT=$(for f in "$OBJ"/*.o; do if "$OBJDUMP" -h "$f" | grep -qE ' \.(ctors|dtors|tls|CRT\$)'; then basename "$f"; fi; done)
 if [ -n "$INIT" ]; then echo "engine objects need MinGW start-up code: $INIT" >&2; exit 1; fi
+if [ "${NCAMP_ENGINE_ASSERTS:-0}" != 1 ]; then
+  # release: no C runtime assertions (msvcrt _assert / _wassert show a modal dialog) ...
+  ASRT=$(for f in "$OBJ"/*.o; do if "$NM" -u "$f" | grep -qE ' (__imp_)?_w?assert$'; then basename "$f"; fi; done)
+  if [ -n "$ASRT" ]; then echo "engine objects use C assertions (build with -DNDEBUG): $ASRT" >&2; exit 1; fi
+  # ... and no build paths (assertion / hardening messages carry __FILE__)
+  LEAK=$(for f in "$OBJ"/*.o; do if strings -a "$f" | grep -qF "$ROOT"; then basename "$f"; fi; done)
+  if [ -n "$LEAK" ]; then echo "engine objects contain the build path $ROOT: $LEAK" >&2; exit 1; fi
+fi
 rm -f "$E/ncaudio.dll"
 echo "Built the audio engine: $(ls "$OBJ" | wc -l) objects in src/engine/obj (src/engine/objs.inc)"

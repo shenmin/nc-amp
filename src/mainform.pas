@@ -16,7 +16,7 @@ uses
 const
   APPNAME = 'nc-amp';
   APPTITLE = 'nc-amp';
-  APPVERSION = '2.0.0';
+  APPVERSION = '2.0.1';
   MAINW = 275;
   MAINH = 116;
   TITLEH = 16;        { ONE title-bar height for both windows (logical; scaled with identical rounding) }
@@ -120,7 +120,10 @@ type
     { native tooltip with the song title over the collapsed (shade) main window }
     FShadeTip: TNcTip;
     FShadeTipKey: string;
+    FVolTip: TNcTip;      { shade mode: "Volume: NN%" readout under the volume slider }
+    FVolTipKey: string;
     procedure UpdateShadeTip;
+    procedure UpdateVolTip;
     procedure LcdTipDraw(DC: HDC; const R: TRect; const S: string; Measure: Boolean;
       MaxW: Integer; out W, H: Integer);
     procedure TimerTick(Sender: TObject);
@@ -589,7 +592,7 @@ const
   { shade bar layout (logical units): title 10..~68, transport, time, seek, window buttons 235.. }
   SH_BTN_X = 76;  SH_BTN_P = 12;            { 5 cells 76..136 }
   SH_TIME_X = 142; SH_TIME_W = 34;          { 142..176 }
-  SH_SEEK_X = 182; SH_SEEK_W = 56;          { 182..238 (room freed by the removed minimise button) }
+  SH_SEEK_X = 182; SH_SEEK_W = 56;          { 182..238: the volume slider (2.0.1; was the seek strip) }
   PL_BOT = 19;        { playlist bottom bar height (incl. bottom edge) }
   MQ_HOLD = 30;   { marquee pause at the start of each loop (logical px of travel) }
   MQ_H = 10;                       { marquee text height (logical) }
@@ -1011,6 +1014,7 @@ end;
 procedure TMainForm.FormDestroy(Sender: TObject);
 begin
   FreeAndNil(FShadeTip);
+  FreeAndNil(FVolTip);
   Application.OnEndSession := nil;
   Application.OnQueryEndSession := nil;
   StopIpcServer;
@@ -1526,16 +1530,13 @@ begin
     end
     else begin s := '0:00'; col := cInkSoft; end;
     LcdInRect(c, r, (r.Left + r.Right - LcdWidth(c, s, 8)) div 2, s, 8, col);
-    { seek strip }
+    { volume slider (2.0.1): where the seek strip was, same strip and thumb; the shade bar is
+      too short for seeking to be useful, the volume is what one reaches for there }
     FillC(c, LR(SH_SEEK_X, TB_MAIN_CY - 1.2, SH_SEEK_W, 2.4), cBezel);
     FillC(c, Rect(P(SH_SEEK_X), P(TB_MAIN_CY + 1.2), P(SH_SEEK_X + SH_SEEK_W), P(TB_MAIN_CY + 1.2) + LW), RGB_(100, 100, 100));
-    len := CurLen;
-    if FStream and (len > 0) then
-    begin
-      if FDragging = bSeek then frac := FSeekFrac else frac := EnsureRange(CurPos / len, 0, 1);
-      x := Round((SH_SEEK_X + (SH_SEEK_W - 8) * frac) * G);
-      ChromeThumb(c, Rect(x, P(TB_MAIN_CY - 3.5), x + P(8), P(TB_MAIN_CY + 3.5)), FDragging = bSeek);
-    end;
+    frac := EnsureRange(FVolume / 100, 0, 1);
+    x := Round((SH_SEEK_X + (SH_SEEK_W - 8) * frac) * G);
+    ChromeThumb(c, Rect(x, P(TB_MAIN_CY - 3.5), x + P(8), P(TB_MAIN_CY + 3.5)), FDragging = bVol);
     WinGlyphs(c, TB_MAIN_CY, False, FPressed, bNone, bShade, bClose, True);
     Exit;
   end;
@@ -1848,7 +1849,7 @@ begin
     if InL(X, Y, SH_BTN_X - 0.5, 0, 5 * SH_BTN_P, SHADEH) then
       Exit(TBtnId(Ord(bPrev) + EnsureRange(Trunc((X / G - SH_BTN_X + 0.5) / SH_BTN_P), 0, 4)));
     if InL(X, Y, SH_TIME_X - 1, 0, SH_TIME_W + 2, SHADEH) then Exit(bTime);
-    if InL(X, Y, SH_SEEK_X - 2, 0, SH_SEEK_W + 4, SHADEH) then Exit(bSeek);
+    if InL(X, Y, SH_SEEK_X - 2, 0, SH_SEEK_W + 4, SHADEH) then Exit(bVol);
     Exit(bMove);
   end;
   if InL(X, Y, 0, 0, MAINW, TITLEH) then Exit(bMove);
@@ -1889,7 +1890,8 @@ begin
   case id of
     bVol:
       begin
-        f := (X / G - 104 - 7) / 60;
+        if FShade then f := (X / G - SH_SEEK_X - 4) / (SH_SEEK_W - 8)
+        else f := (X / G - 104 - 7) / 60;
         FVolume := EnsureRange(Round(f * 100), 0, 100);
         ApplyVolume;
       end;
@@ -1902,8 +1904,7 @@ begin
       end;
     bSeek:
       begin
-        if FShade then f := (X / G - SH_SEEK_X - 4) / (SH_SEEK_W - 8)
-        else f := (X / G - 12 - 14) / 226;
+        f := (X / G - 12 - 14) / 226;
         FSeekFrac := EnsureRange(f, 0, 1);
       end;
     bScroll:
@@ -1918,6 +1919,7 @@ begin
       end;
   end;
   InvalidateAll;
+  if id = bVol then UpdateVolTip;
 end;
 
 function BtnName(id: TBtnId): string;
@@ -2232,6 +2234,7 @@ begin
     if WheelDelta > 0 then FVolume := Min(100, FVolume + 4) else FVolume := Max(0, FVolume - 4);
     ApplyVolume;
     ShowOsd(bVol);
+    UpdateVolTip;
   end;
   InvalidateAll;
 end;
@@ -2496,8 +2499,9 @@ begin
     FShadeTipKey := key;
     FShadeTip.SetDpi(FDpiMain);
     if FShade then
-      { the empty parts of the bar: logo/title area and the gaps between the
-        transport buttons, time, seek strip and the shade/close buttons (see HitMain) }
+      { the empty parts of the bar: logo/title area and the gaps between the transport
+        buttons, time, volume slider and the shade/close buttons (see HitMain); never
+        over the volume slider, which has its own readout (UpdateVolTip) }
       FShadeTip.SetRects([R(0, SH_BTN_X - 0.5), R(SH_BTN_X - 0.5 + 5 * SH_BTN_P, SH_TIME_X - 1),
         R(SH_TIME_X + SH_TIME_W + 1, SH_SEEK_X - 2), R(SH_SEEK_X + SH_SEEK_W + 2, 245.5)])
     else
@@ -2506,6 +2510,45 @@ begin
   end;
   if FShade and (FCur >= 0) and (FCur < FCount) then t := DisplayTitle(FCur) else t := '';
   FShadeTip.SetText(t);
+end;
+
+{ Shade mode: while the volume slider is dragged, clicked or wheeled (and ~1 s after),
+  "Volume: NN%" in an LCD-styled popup like the title tooltip, centred under the thumb
+  and following it. The expanded window shows the same readout in its LCD instead
+  (OsdText). Called from the timer and on every slider change. }
+procedure TMainForm.UpdateVolTip;
+var
+  s, key: string;
+  x: Integer;
+  r: TRect;
+  tl, br: TPoint;
+begin
+  s := OsdText;
+  if not (FShade and (s <> '') and (FOsdSlider = bVol) and HandleAllocated and ShownOnce and Visible) then
+  begin
+    if (FVolTip <> nil) and FVolTip.Shown then FVolTip.Hide;
+    FVolTipKey := '';
+    Exit;
+  end;
+  if (FVolTip <> nil) and (FVolTip.Owner <> Handle) then FreeAndNil(FVolTip);   { handle recreated }
+  if FVolTip = nil then
+  begin
+    FVolTip := TNcTip.Create(Handle);
+    FVolTip.SetColors(ColorToRGB(cSage), ColorToRGB(cInk), RGB(144, 162, 138));
+    if SameText(GetEnvironmentVariable('NCAMP_TIP_FONT'), 'lcd') then FVolTip.OnDraw := @LcdTipDraw;
+  end;
+  FVolTip.SetDpi(FDpiMain);
+  G := FScaleMain;
+  x := Round((SH_SEEK_X + (SH_SEEK_W - 8) * EnsureRange(FVolume / 100, 0, 1)) * G);
+  tl := ClientToScreen(Point(x, 0));
+  br := ClientToScreen(Point(x + P(8), ClientHeight));
+  r := Rect(tl.X, tl.Y, br.X, br.Y);
+  key := Format('%s|%d|%d|%d|%d', [s, r.Left, r.Top, r.Bottom, FDpiMain]);
+  if key = FVolTipKey then Exit;
+  if FVolTipKey = '' then DebugLog('shade volume readout shown: ' + s);
+  FVolTipKey := key;
+  if FShadeTip <> nil then FShadeTip.Hide;
+  FVolTip.ShowFixed(s, r);
 end;
 
 { NCAMP_TIP_FONT=lcd: tooltip text in the LCD fonts (mono Latin + UI font for CJK),
@@ -3110,6 +3153,7 @@ var
   why: array[0..599] of AnsiChar;
 begin
   UpdateTrayTip;
+  UpdateVolTip;
   if FShadeTip <> nil then FShadeTip.Poll;   { hover tracking of the shade tooltip }
   if (FOsdUntil <> 0) and (FDragging = bNone) and (GetTickCount64 >= FOsdUntil) then
   begin
