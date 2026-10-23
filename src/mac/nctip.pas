@@ -2,7 +2,7 @@
   Copyright (C) 2026 Shen Min }
 unit NcTip;
 { Self-drawn tooltip for areas of a custom-drawn window (macOS): a small borderless, non-activating
-  NSPanel that ignores the mouse, in the player's LCD colours, with the system font at 8 pt.
+  NSPanel that ignores the mouse, in the player's LCD colours, with the system font at 12 pt.
   Hover timing follows the native tooltip (initial delay = double-click interval, auto-pop after
   10x that). The owner calls Poll from its UI timer. Same interface as the Windows unit;
   coordinates are in points (the owner's client area / LCL screen coordinates, y down). }
@@ -60,7 +60,7 @@ uses CocoaAll;
 const
   PAD = 6;          { padding on every side (points) }
   BW = 1;           { border width }
-  FONT_PT = 8;      { system font size }
+  FONT_PT = 12;     { system font size (points) }
   MAXW = 420;       { wrap width of the text }
   CURSOR_DY = 18;   { tooltip top below the hot spot }
 
@@ -77,6 +77,28 @@ begin
   { COLORREF: $00BBGGRR }
   Result := NSColor.colorWithCalibratedRed_green_blue_alpha((c and $FF) / 255, ((c shr 8) and $FF) / 255,
     ((c shr 16) and $FF) / 255, 1);
+end;
+
+{ visible frame (Cocoa coordinates) of the screen that holds the LCL point (X, Y), y down from the
+  top of the primary screen; falls back to the main screen }
+function ScreenVisibleAt(X, Y: Integer): NSRect;
+var
+  i: Integer;
+  scr: NSScreen;
+  f: NSRect;
+  cy, screenH: Double;
+begin
+  screenH := NSScreen.screens.objectAtIndex(0).frame.size.height;
+  cy := screenH - Y;
+  Result := NSScreen.mainScreen.visibleFrame;
+  for i := 0 to Integer(NSScreen.screens.count) - 1 do
+  begin
+    scr := NSScreen(NSScreen.screens.objectAtIndex(i));
+    f := scr.frame;
+    if (X >= f.origin.x) and (X < f.origin.x + f.size.width) and
+       (cy >= f.origin.y) and (cy <= f.origin.y + f.size.height) then
+      Exit(scr.visibleFrame);
+  end;
 end;
 
 constructor TNcTip.Create(Owner: HWND);
@@ -148,13 +170,13 @@ begin
   w.Box.setFillColor(NSCol(FBg));
   w.Box.setBorderColor(NSCol(FBorder));
   w.Lbl.setTextColor(NSCol(FFg));
-  s := NSSTR(PChar(Txt));
+  s := NSString.stringWithUTF8String(PChar(Txt));   { UTF-8: Chinese titles must not turn into garbage }
   w.Lbl.setStringValue(s);
   attrs := NSDictionary.dictionaryWithObject_forKey(NSFont.systemFontOfSize(FONT_PT), NSFontAttributeName);
   r := s.boundingRectWithSize_options_attributes(NSMakeSize(MAXW, 10000),
     NSStringDrawingUsesLineFragmentOrigin or NSStringDrawingUsesFontLeading, attrs);
-  w.TextW := Ceil(r.size.width) + 2;
-  w.TextH := Ceil(r.size.height);
+  w.TextW := Ceil(r.size.width) + 8;   { slack so the label never wraps / clips the last characters }
+  w.TextH := Ceil(r.size.height) + 2;
   w.Lbl.setFrame(NSMakeRect(PAD + BW, PAD + BW, w.TextW, w.TextH));
   w.Panel.setContentSize(NSMakeSize(w.TextW + 2 * (PAD + BW), w.TextH + 2 * (PAD + BW)));
 end;
@@ -236,7 +258,7 @@ begin
   pw := w.TextW + 2 * (PAD + BW);
   ph := w.TextH + 2 * (PAD + BW);
   screenH := NSScreen.screens.objectAtIndex(0).frame.size.height;
-  vis := NSScreen.mainScreen.visibleFrame;
+  vis := ScreenVisibleAt(X, Y);
   ox := X;
   if ox + pw > vis.origin.x + vis.size.width then ox := vis.origin.x + vis.size.width - pw;
   if ox < vis.origin.x then ox := vis.origin.x;
@@ -323,7 +345,7 @@ begin
   x := (Anchor.Left + Anchor.Right - pw) div 2;
   y := Anchor.Bottom + 3;
   screenH := NSScreen.screens.objectAtIndex(0).frame.size.height;
-  vis := NSScreen.mainScreen.visibleFrame;
+  vis := ScreenVisibleAt(x, Anchor.Bottom);
   oy := screenH - y - ph;
   if oy < vis.origin.y then y := Anchor.Top - 3 - ph;   { flip above }
   ShowAt(x, y, False);
