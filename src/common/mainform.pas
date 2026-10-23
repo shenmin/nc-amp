@@ -562,9 +562,16 @@ function LcdOut(c: TCanvas; const clip: TRect; x, baseY: Integer; const s: strin
   hLogical: Double; col: TColor): Integer;
 var
   r: TRuns; i: Integer;
+  {$IFNDEF MSWINDOWS}rgn: HRGN;{$ENDIF}
 begin
   r := SplitRuns(s);
   c.Brush.Style := bsClear;
+  {$IFNDEF MSWINDOWS}
+  { the Cocoa canvas ignores the clip rectangle TextRect sets up (the scrolling title ran over the time
+    display): clip with a region around the whole text, as GradRound does }
+  rgn := CreateRectRgn(clip.Left, clip.Top, clip.Right, clip.Bottom);
+  SelectClipRgn(c.Handle, rgn);
+  {$ENDIF}
   for i := 0 to High(r) do
   begin
     SetLcdFont(c, r[i].Latin, hLogical);
@@ -572,6 +579,10 @@ begin
     c.TextRect(clip, x, baseY - LcdAscent(c), r[i].s);
     Inc(x, c.TextWidth(r[i].s));
   end;
+  {$IFNDEF MSWINDOWS}
+  SelectClipRgn(c.Handle, 0);
+  DeleteObject(rgn);
+  {$ENDIF}
   Result := x;
 end;
 
