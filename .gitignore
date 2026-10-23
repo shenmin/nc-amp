@@ -21,3 +21,6 @@ Thumbs.db
 /src/engine/obj/
 /src/engine/lib/
 /src/engine/objs.inc
+/build-mac/
+/src/engine/lib-mac/
+/dist-mac/

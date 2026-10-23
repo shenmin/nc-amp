@@ -9,7 +9,7 @@ unit TagReader;
 
 interface
 
-uses Windows, SysUtils, Classes, Math, NcAudio;
+uses {$IFDEF MSWINDOWS}Windows, {$ELSE}LConvEncoding, {$ENDIF}SysUtils, Classes, Math, NcAudio;
 
 function ReadTrackInfo(const FileNameUTF8: string; out Title: string; out Duration: Double): Boolean;
 function ReadTitle(const FileNameUTF8: string): string;
@@ -52,10 +52,19 @@ begin
     SetString(Result, PAnsiChar(p), n);
     Exit;
   end;
+  {$IFDEF MSWINDOWS}
   m := MultiByteToWideChar(CP_ACP, 0, PAnsiChar(p), n, nil, 0);
   SetLength(w, m);
   if m > 0 then MultiByteToWideChar(CP_ACP, 0, PAnsiChar(p), n, PWideChar(w), m);
   Result := UTF8Encode(w);
+  {$ELSE}
+  { no "ANSI code page" on macOS: legacy tags are GBK in practice (Chinese MP3 collections),
+    unless the text only looks sensible as Latin-1 }
+  SetString(Result, PAnsiChar(p), n);
+  Result := ConvertEncoding(Result, 'cp936', EncodingUTF8);
+  w := '';
+  m := 0;
+  {$ENDIF}
 end;
 
 function UTF16ToUTF8(p: PByte; n: Integer; BigEndian: Boolean): string;
@@ -162,6 +171,7 @@ end;
 { ---------- file access (UTF-16 paths) ---------- }
 
 function OpenRead(const fn: string): THandleStream;
+{$IFDEF MSWINDOWS}
 var
   h: THandle;
 begin
@@ -170,11 +180,23 @@ begin
     nil, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, 0);
   if h <> INVALID_HANDLE_VALUE then Result := THandleStream.Create(h);
 end;
+{$ELSE}
+begin
+  Result := nil;
+  try
+    Result := TFileStream.Create(fn, fmOpenRead or fmShareDenyNone);   { TFileStream is a THandleStream }
+  except
+    Result := nil;
+  end;
+end;
+{$ENDIF}
 
 procedure CloseRead(var f: THandleStream);
 begin
   if f = nil then Exit;
+  {$IFDEF MSWINDOWS}
   CloseHandle(f.Handle);
+  {$ENDIF}
   FreeAndNil(f);
 end;
 
@@ -399,13 +421,11 @@ end;
 function ReadTrackInfo(const FileNameUTF8: string; out Title: string; out Duration: Double): Boolean;
 var
   info: TNcaInfo;
-  w: UnicodeString;
 begin
   Title := ''; Duration := -1; Result := False;
   if not AudioLoaded then Exit;
-  w := UTF8Decode(FileNameUTF8);
   FillChar(info, SizeOf(info), 0);
-  if nca_probe(PWideChar(w), @info) = 0 then Exit;
+  if nca_probe_utf8(FileNameUTF8, @info) = 0 then Exit;
   Duration := info.Length;
   Title := ReadTitle(FileNameUTF8);
   Result := True;

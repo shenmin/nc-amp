@@ -10,7 +10,7 @@ unit TitleFont;
 {$mode objfpc}{$H+}
 interface
 
-uses Windows, Graphics;
+uses {$IFDEF MSWINDOWS}Windows, {$ENDIF}Graphics;
 
 { x-height and tracking in device pixels; returns drawn width }
 function TitleWidth(XH, Track: Double): Integer;
@@ -23,10 +23,25 @@ procedure FillPolysAA(c: TCanvas; const Pts: array of Double; const Counts: arra
 
 implementation
 
-uses Math;
+uses {$IFNDEF MSWINDOWS}MacOSAll, CocoaGDIObjects, {$ENDIF}Math;
+
+{$IFNDEF MSWINDOWS}
+type
+  { access to a protected method: tell LCL's bitmap that we drew into its CGContext directly }
+  TCtxCrack = class(TCocoaContext)
+  public
+    procedure Touch;
+  end;
+
+procedure TCtxCrack.Touch;
+begin
+  AttachedBitmap_SetModified;
+end;
+{$ENDIF}
 
 {$I titleglyphs.inc}
 
+{$IFDEF MSWINDOWS}
 type
   TCacheEnt = record
     XH, Track: Double; Face, Shadow: TColor; Off: Integer;
@@ -39,6 +54,7 @@ var
 
 function AlphaBlendX(hdcDest: HDC; xD, yD, wD, hD: Integer; hdcSrc: HDC;
   xS, yS, wS, hS: Integer; blend: DWORD): BOOL; stdcall; external 'msimg32.dll' name 'AlphaBlend';
+{$ENDIF}
 
 function TitleWidth(XH, Track: Double): Integer;
 var
@@ -50,6 +66,7 @@ begin
   Result := Ceil(w);
 end;
 
+{$IFDEF MSWINDOWS}
 function Build(XH, Track: Double; Face, Shadow: TColor; Off: Integer): TCacheEnt;
 type
   TEdge = record x0, y0, x1, y1: Double; end;
@@ -313,6 +330,95 @@ begin
       DeleteObject(Cache[i].Bmp); Cache[i].Bmp := 0;
     end;
 end;
+{$ELSE}
+{ macOS: Core Graphics anti-aliases path fills itself (non-zero winding), so the glyph
+  contours and polygons go straight into the canvas' CGContext - no coverage buffers }
+function CgOf(c: TCanvas): CGContextRef;
+begin
+  Result := TCocoaContext(c.Handle).CGContext;
+end;
+
+procedure CgTouch(c: TCanvas);
+begin
+  TCtxCrack(c.Handle).Touch;
+end;
+
+procedure CgFillColor(cg: CGContextRef; Col: TColor);
+var
+  v: Integer;
+begin
+  v := ColorToRGB(Col);
+  CGContextSetRGBFillColor(cg, (v and $FF) / 255, ((v shr 8) and $FF) / 255, ((v shr 16) and $FF) / 255, 1);
+end;
+
+procedure DrawTitle(c: TCanvas; X, BaseY: Integer; XH, Track: Double;
+  Face, Shadow: TColor; ShadowOff: Integer);
+var
+  cg: CGContextRef;
+  pass, g, ci, j, p0, p1: Integer;
+  k, pen, dx: Double;
+begin
+  cg := CgOf(c);
+  if cg = nil then Exit;
+  k := XH / TG_XHEIGHT;
+  CGContextSaveGState(cg);
+  CGContextSetShouldAntialias(cg, 1);
+  for pass := 0 to 1 do    { shadow first, then the face on top }
+  begin
+    if pass = 0 then begin CgFillColor(cg, Shadow); dx := ShadowOff; end
+    else begin CgFillColor(cg, Face); dx := 0; end;
+    pen := 0;
+    CGContextBeginPath(cg);
+    for g := 0 to High(TG_ADV) do
+    begin
+      for ci := TG_GFIRST[g] to TG_GFIRST[g] + TG_GCOUNT[g] - 1 do
+      begin
+        p0 := TG_CSTART[ci]; p1 := TG_CSTART[ci + 1] - 1;
+        for j := p0 to p1 do
+        begin
+          if j = p0 then CGContextMoveToPoint(cg, X + dx + pen + TG_PTS[j * 2] * k, BaseY + dx - TG_PTS[j * 2 + 1] * k)
+          else CGContextAddLineToPoint(cg, X + dx + pen + TG_PTS[j * 2] * k, BaseY + dx - TG_PTS[j * 2 + 1] * k);
+        end;
+        CGContextClosePath(cg);
+      end;
+      pen := pen + TG_ADV[g] * k + Track;
+    end;
+    CGContextFillPath(cg);   { non-zero winding }
+  end;
+  CGContextRestoreGState(cg);
+  CgTouch(c);
+end;
+
+procedure FillPolysAA(c: TCanvas; const Pts: array of Double; const Counts: array of Integer; Col: TColor);
+var
+  cg: CGContextRef;
+  j, i, base: Integer;
+begin
+  if Length(Pts) < 6 then Exit;
+  cg := CgOf(c);
+  if cg = nil then Exit;
+  CGContextSaveGState(cg);
+  CGContextSetShouldAntialias(cg, 1);
+  CgFillColor(cg, Col);
+  CGContextBeginPath(cg);
+  base := 0;
+  for j := 0 to High(Counts) do
+  begin
+    for i := 0 to Counts[j] - 1 do
+      if i = 0 then CGContextMoveToPoint(cg, Pts[(base + i) * 2], Pts[(base + i) * 2 + 1])
+      else CGContextAddLineToPoint(cg, Pts[(base + i) * 2], Pts[(base + i) * 2 + 1]);
+    CGContextClosePath(cg);
+    Inc(base, Counts[j]);
+  end;
+  CGContextFillPath(cg);
+  CGContextRestoreGState(cg);
+  CgTouch(c);
+end;
+
+procedure FreeTitleCache;
+begin
+end;
+{$ENDIF}
 
 finalization
   FreeTitleCache;

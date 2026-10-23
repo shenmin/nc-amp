@@ -1,12 +1,14 @@
 /* SPDX-License-Identifier: GPL-3.0-or-later
  * Copyright (C) 2026 Shen Min
  *
- * ncaudio - the nc-amp audio engine (linked into nc-amp.exe), built only from open-source parts:
+ * ncaudio - the nc-amp audio engine (linked into the nc-amp executable), built only from open-source parts:
  *   miniaudio (playback device; MP3/FLAC/WAV decoding via its bundled dr_libs code),
  *   stb_vorbis (Ogg Vorbis), libopus + opusfile + libogg (Opus),
- *   Windows Media Foundation (M4A / AAC, decoded by the OS - no codec is bundled).
- * Plain C API used from Free Pascal (ncaudio.pas). All paths are UTF-16 (wchar_t).
+ *   Windows Media Foundation / macOS AudioToolbox (M4A / AAC, decoded by the OS - no codec is bundled).
+ * Plain C API used from Free Pascal (ncaudio.pas). Paths are UTF-16 (wchar_t) on Windows and
+ * UTF-8 (char) on macOS (nca_char).
  */
+#ifdef _WIN32
 #define WIN32_LEAN_AND_MEAN
 #define COBJMACROS
 #include <windows.h>
@@ -15,6 +17,35 @@
 #include <mfreadwrite.h>
 #include <mferror.h>
 #include <mmdeviceapi.h>
+typedef wchar_t nca_char;
+#define NCA_T(x) L##x
+#define nca_strrchr   wcsrchr
+#define nca_stricmp   _wcsicmp
+#define nca_strcpy    wcscpy
+#define nca_fopen_rb(p) _wfopen((p), L"rb")
+#define nca_fseek64   _fseeki64
+#define nca_ftell64   _ftelli64
+#define nca_decoder_init_file ma_decoder_init_file_w
+#define NCA_MAXPATH   (MAX_PATH * 4)
+#else
+#include "ncplat.h"
+#include <strings.h>
+#include <wchar.h>
+#include <wctype.h>
+#include <ctype.h>
+typedef wchar_t WCHAR;
+typedef char nca_char;
+#define NCA_T(x) x
+#define DEVICE_STATE_ACTIVE 1
+#define nca_strrchr   strrchr
+#define nca_stricmp   strcasecmp
+#define nca_strcpy    strcpy
+#define nca_fopen_rb(p) fopen((p), "rb")
+#define nca_fseek64   fseeko
+#define nca_ftell64   ftello
+#define nca_decoder_init_file ma_decoder_init_file
+#define NCA_MAXPATH   4096
+#endif
 #include <math.h>
 #include <string.h>
 #include <stdlib.h>
@@ -41,6 +72,15 @@
 
 #define NCA_API             /* linked statically into nc-amp.exe (2.0.0+), no exports */
 
+static int nca_ext_is(const nca_char *path, const nca_char *const *exts)
+{
+    const nca_char *dot = nca_strrchr(path, NCA_T('.'));
+    if (!dot) return 0;
+    for (; *exts; exts++) if (nca_stricmp(dot, *exts) == 0) return 1;
+    return 0;
+}
+
+#ifdef _WIN32
 /* ------------------------------------------------------------------ */
 /* Media Foundation decoding backend (m4a / mp4 / aac)                 */
 /* ------------------------------------------------------------------ */
@@ -145,14 +185,6 @@ static ma_result nca_mf_length(ma_data_source *pDS, ma_uint64 *l) { *l = ((nca_m
 
 static ma_data_source_vtable g_nca_mf_ds_vtable = { nca_mf_read, nca_mf_seek, nca_mf_format, nca_mf_cursor, nca_mf_length, NULL, 0 };
 
-static int nca_ext_is(const wchar_t *path, const wchar_t *const *exts)
-{
-    const wchar_t *dot = wcsrchr(path, L'.');
-    if (!dot) return 0;
-    for (; *exts; exts++) if (_wcsicmp(dot, *exts) == 0) return 1;
-    return 0;
-}
-
 static const wchar_t *const g_mfExts[] = { L".m4a", L".mp4", L".aac", L".m4b", L".3gp", NULL };
 
 static ma_result nca_mf_init_file_w(void *ud, const wchar_t *path, const ma_decoding_backend_config *cfg,
@@ -207,6 +239,107 @@ static void nca_mf_uninit(void *ud, ma_data_source *pDS, const ma_allocation_cal
 }
 
 static ma_decoding_backend_vtable g_nca_mf_backend = { NULL, NULL, nca_mf_init_file_w, NULL, nca_mf_uninit };
+#endif /* _WIN32 */
+
+#ifdef __APPLE__
+/* ------------------------------------------------------------------ */
+/* AudioToolbox decoding backend (m4a / mp4 / aac / alac / aiff / caf): ExtAudioFile, decoded by macOS */
+/* ------------------------------------------------------------------ */
+#include <AudioToolbox/AudioToolbox.h>
+typedef struct {
+    ma_data_source_base ds;
+    ExtAudioFileRef file;
+    ma_uint32 channels, rate;
+    ma_uint64 length, cursor;
+} nca_at;
+
+static const char *const g_atExts[] = { ".m4a", ".mp4", ".aac", ".m4b", ".3gp", ".alac", ".aif", ".aiff", ".aifc", ".caf", NULL };
+
+static ma_result nca_at_read(ma_data_source *pDS, void *out, ma_uint64 frameCount, ma_uint64 *pRead)
+{
+    nca_at *m = (nca_at*)pDS; ma_uint64 done = 0; float tmp[4096];
+    while (done < frameCount) {
+        UInt32 want = (UInt32)((frameCount - done) > 4096 ? 4096 : (frameCount - done)), n;
+        AudioBufferList bl; OSStatus st;
+        float *dst = out ? (float*)out + done * m->channels : tmp;
+        if (!out && want * m->channels > 4096) want = 4096 / m->channels;
+        if (out && want > 4096) want = 4096;
+        n = want;
+        bl.mNumberBuffers = 1; bl.mBuffers[0].mNumberChannels = m->channels;
+        bl.mBuffers[0].mDataByteSize = want * m->channels * (UInt32)sizeof(float); bl.mBuffers[0].mData = dst;
+        st = ExtAudioFileRead(m->file, &n, &bl);
+        if (st != noErr || n == 0) break;
+        done += n;
+    }
+    m->cursor += done;
+    if (pRead) *pRead = done;
+    return (done == 0 && frameCount > 0) ? MA_AT_END : MA_SUCCESS;
+}
+static ma_result nca_at_seek(ma_data_source *pDS, ma_uint64 frame)
+{
+    nca_at *m = (nca_at*)pDS;
+    if (ExtAudioFileSeek(m->file, (SInt64)frame) != noErr) return MA_ERROR;
+    m->cursor = frame;
+    return MA_SUCCESS;
+}
+static ma_result nca_at_format(ma_data_source *pDS, ma_format *f, ma_uint32 *ch, ma_uint32 *sr, ma_channel *map, size_t cap)
+{
+    nca_at *m = (nca_at*)pDS;
+    if (f) *f = ma_format_f32;
+    if (ch) *ch = m->channels;
+    if (sr) *sr = m->rate;
+    if (map) ma_channel_map_init_standard(ma_standard_channel_map_default, map, cap, m->channels);
+    return MA_SUCCESS;
+}
+static ma_result nca_at_cursor(ma_data_source *pDS, ma_uint64 *c) { *c = ((nca_at*)pDS)->cursor; return MA_SUCCESS; }
+static ma_result nca_at_length(ma_data_source *pDS, ma_uint64 *l) { *l = ((nca_at*)pDS)->length; return MA_SUCCESS; }
+static ma_data_source_vtable g_nca_at_ds_vtable = { nca_at_read, nca_at_seek, nca_at_format, nca_at_cursor, nca_at_length, NULL, 0 };
+
+static ma_result nca_at_init_file(void *ud, const char *path, const ma_decoding_backend_config *cfg,
+                                  const ma_allocation_callbacks *alloc, ma_data_source **ppDS)
+{
+    nca_at *m; CFURLRef url; ExtAudioFileRef f = NULL; OSStatus st;
+    AudioStreamBasicDescription fd, cl; UInt32 sz; SInt64 len = 0;
+    (void)ud; (void)cfg; (void)alloc;
+    if (!nca_ext_is(path, g_atExts)) return MA_INVALID_FILE;
+    url = CFURLCreateFromFileSystemRepresentation(NULL, (const UInt8*)path, (CFIndex)strlen(path), false);
+    if (!url) return MA_INVALID_FILE;
+    st = ExtAudioFileOpenURL(url, &f);
+    CFRelease(url);
+    if (st != noErr || !f) return MA_INVALID_FILE;
+    sz = sizeof fd;
+    if (ExtAudioFileGetProperty(f, kExtAudioFileProperty_FileDataFormat, &sz, &fd) != noErr || fd.mSampleRate < 1 || fd.mChannelsPerFrame < 1) {
+        ExtAudioFileDispose(f); return MA_INVALID_FILE;
+    }
+    memset(&cl, 0, sizeof cl);
+    cl.mSampleRate = fd.mSampleRate; cl.mFormatID = kAudioFormatLinearPCM;
+    cl.mFormatFlags = kAudioFormatFlagsNativeFloatPacked;
+    cl.mChannelsPerFrame = fd.mChannelsPerFrame > 8 ? 8 : fd.mChannelsPerFrame;
+    cl.mBitsPerChannel = 32; cl.mFramesPerPacket = 1;
+    cl.mBytesPerFrame = cl.mBytesPerPacket = cl.mChannelsPerFrame * 4;
+    if (ExtAudioFileSetProperty(f, kExtAudioFileProperty_ClientDataFormat, sizeof cl, &cl) != noErr) { ExtAudioFileDispose(f); return MA_INVALID_FILE; }
+    m = (nca_at*)calloc(1, sizeof *m);
+    if (!m) { ExtAudioFileDispose(f); return MA_OUT_OF_MEMORY; }
+    m->file = f; m->channels = cl.mChannelsPerFrame; m->rate = (ma_uint32)(cl.mSampleRate + 0.5);
+    sz = sizeof len;
+    if (ExtAudioFileGetProperty(f, kExtAudioFileProperty_FileLengthFrames, &sz, &len) == noErr && len > 0) m->length = (ma_uint64)len;
+    {
+        ma_data_source_config dc = ma_data_source_config_init();
+        dc.vtable = &g_nca_at_ds_vtable;
+        if (ma_data_source_init(&dc, &m->ds) != MA_SUCCESS) { ExtAudioFileDispose(f); free(m); return MA_ERROR; }
+    }
+    *ppDS = (ma_data_source*)m;
+    return MA_SUCCESS;
+}
+static void nca_at_uninit(void *ud, ma_data_source *pDS, const ma_allocation_callbacks *alloc)
+{
+    nca_at *m = (nca_at*)pDS; (void)ud; (void)alloc;
+    ma_data_source_uninit(&m->ds);
+    if (m->file) ExtAudioFileDispose(m->file);
+    free(m);
+}
+static ma_decoding_backend_vtable g_nca_at_backend = { NULL, nca_at_init_file, NULL, NULL, nca_at_uninit };
+#endif /* __APPLE__ */
 
 /* ------------------------------------------------------------------ */
 /* Ogg Vorbis backend: stb_vorbis in pull mode on a _wfopen()ed file    */
@@ -254,17 +387,15 @@ static ma_result nca_vb_cursor(ma_data_source *pDS, ma_uint64 *c) { *c = ((nca_v
 static ma_result nca_vb_length(ma_data_source *pDS, ma_uint64 *l) { *l = ((nca_vorbis*)pDS)->length; return MA_SUCCESS; }
 static ma_data_source_vtable g_nca_vb_ds_vtable = { nca_vb_read, nca_vb_seek, nca_vb_format, nca_vb_cursor, nca_vb_length, NULL, 0 };
 
-static const wchar_t *const g_vbExts[] = { L".ogg", L".oga", NULL };
+static const nca_char *const g_vbExts[] = { NCA_T(".ogg"), NCA_T(".oga"), NULL };
 
-static int nca_ext_is(const wchar_t *path, const wchar_t *const *exts);
-
-static ma_result nca_vb_init_file_w(void *ud, const wchar_t *path, const ma_decoding_backend_config *cfg,
+static ma_result nca_vb_init_file_w(void *ud, const nca_char *path, const ma_decoding_backend_config *cfg,
                                     const ma_allocation_callbacks *alloc, ma_data_source **ppDS)
 {
     nca_vorbis *m; FILE *f; int err = 0; stb_vorbis_info vi;
     (void)ud; (void)cfg; (void)alloc;
     if (!nca_ext_is(path, g_vbExts)) return MA_INVALID_FILE;
-    f = _wfopen(path, L"rb");
+    f = nca_fopen_rb(path);
     if (!f) return MA_INVALID_FILE;
     m = (nca_vorbis*)calloc(1, sizeof(*m));
     if (!m) { fclose(f); return MA_OUT_OF_MEMORY; }
@@ -288,7 +419,11 @@ static void nca_vb_uninit(void *ud, ma_data_source *pDS, const ma_allocation_cal
     stb_vorbis_close(m->v);
     free(m);
 }
+#ifdef _WIN32
 static ma_decoding_backend_vtable g_nca_vb_backend = { NULL, NULL, nca_vb_init_file_w, NULL, nca_vb_uninit };
+#else
+static ma_decoding_backend_vtable g_nca_vb_backend = { NULL, nca_vb_init_file_w, NULL, NULL, nca_vb_uninit };   /* (the "_w" function takes the UTF-8 path here) */
+#endif
 
 /* ------------------------------------------------------------------ */
 /* player                                                              */
@@ -331,7 +466,8 @@ static ma_decoding_backend_vtable *g_backends[3];
 static volatile float g_peakOut = 0; static volatile LONG g_cbCount = 0, g_cbFrames = 0, g_cbTotal = 0;
 static volatile int g_reopening = 0, g_devInited = 0;
 static volatile int g_needRestart = 0, g_needDescribe = 0, g_shuttingDown = 0;
-static wchar_t g_path[MAX_PATH * 4];
+static nca_char g_path[NCA_MAXPATH];
+static void nca_copy_path(nca_char *dst, const nca_char *src) { size_t i; for (i = 0; i < NCA_MAXPATH - 1 && src[i]; i++) dst[i] = src[i]; dst[i] = 0; }
 static WCHAR g_openId[512];   /* default render endpoint id when the device was opened ("" = none / unknown) */
 /* auto-pause on a real output-device change (1.7.8) */
 #define NCA_BURST_MS 3000           /* changes this soon after an auto-pause belong to it (BT HFP -> A2DP) */
@@ -486,7 +622,11 @@ static void nca_describe(void)
     { float mv = -1; ma_device_get_master_volume(&g_dev, &mv); nca_log("volume=%.3f pan=%.3f masterVolume=%.3f", g_vol, g_pan, mv); }
 }
 
+#ifdef _WIN32
 NCA_API const char *nca_version(void) { return "miniaudio " MA_VERSION_STRING ", stb_vorbis 1.22, opusfile 0.12 / libopus 1.5.2, Media Foundation (AAC)"; }
+#else
+NCA_API const char *nca_version(void) { return "miniaudio " MA_VERSION_STRING ", stb_vorbis 1.22, opusfile 0.12 / libopus 1.5.2, AudioToolbox (AAC)"; }
+#endif
 NCA_API const char *nca_error(void) { return g_err; }
 
 static void nca_setup(void)
@@ -495,12 +635,18 @@ static void nca_setup(void)
     if (!g_lockOk) { InitializeCriticalSection(&g_cs); g_lockOk = 1; }
     g_backends[0] = &g_nca_vb_backend;
     g_backends[1] = ma_decoding_backend_libopus;
+#ifdef _WIN32
     g_backends[2] = &g_nca_mf_backend;
+#else
+    g_backends[2] = &g_nca_at_backend;
+#endif
 }
 
 /* open + start the playback device on the *current default* endpoint (pDeviceID = NULL,
    WASAPI first). miniaudio's automatic stream routing is off; nca_poll follows the default
    endpoint itself and reopens the device. */
+static int nca_default_endpoint(WCHAR *id, int cap, DWORD *state);
+
 static int nca_device_open(void)
 {
     ma_device_config dc = ma_device_config_init(ma_device_type_playback);
@@ -516,6 +662,20 @@ static int nca_device_open(void)
     dc.performanceProfile = ma_performance_profile_conservative;
     dc.wasapi.noAutoStreamRouting = MA_TRUE;
     g_autoRouting = !dc.wasapi.noAutoStreamRouting;
+#ifdef __APPLE__
+    /* An explicit device id (the UID of the current default output, see nca_default_endpoint) keeps
+       miniaudio's CoreAudio backend from following default-device changes itself, from CoreAudio's
+       notification thread; the engine thread polls the default and reopens (like on Windows). */
+    {
+        static ma_device_id did; WCHAR cur[512]; DWORD st = 0; char u8[256]; size_t k;
+        if (!g_testDefOn && nca_default_endpoint(cur, 512, &st)) {
+            for (k = 0; k < sizeof u8 - 1 && cur[k]; k++) u8[k] = (char)cur[k];
+            u8[k] = 0;
+            memset(&did, 0, sizeof did); strncpy(did.coreaudio, u8, sizeof did.coreaudio - 1);
+            dc.playback.pDeviceID = &did;
+        }
+    }
+#endif
     r = ma_device_init(NULL, &dc, &g_dev);
     if (r != MA_SUCCESS) { snprintf(g_err, sizeof g_err, "no audio output device (%s)", ma_result_description(r)); nca_log("%s", g_err); return 0; }
     nca_test_device_opened();
@@ -552,6 +712,7 @@ static int nca_device_close(int shutdown)
 }
 
 static void nca_remember_endpoint(void);
+static int nca_default_endpoint(WCHAR *id, int cap, DWORD *state);
 
 static DWORD WINAPI nca_engine_thread(LPVOID unused);
 
@@ -595,7 +756,7 @@ static ma_uint64 rd_le32(const unsigned char *b) { return ((ma_uint64)b[3] << 24
 
 static int nca_read_at(FILE *f, ma_int64 pos, void *buf, int n)
 {
-    if (pos < 0 || _fseeki64(f, pos, SEEK_SET) != 0) return 0;
+    if (pos < 0 || nca_fseek64(f, pos, SEEK_SET) != 0) return 0;
     return (int)fread(buf, 1, (size_t)n, f);
 }
 
@@ -616,15 +777,15 @@ static int nca_mp3_hdr_kbps(const unsigned char *h, int *isV1, int *mono)
     return layer == 3 ? v2l1[bi] : v2l23[bi];
 }
 
-static int nca_calc_bitrate(const wchar_t *path, double seconds)
+static int nca_calc_bitrate(const nca_char *path, double seconds)
 {
     FILE *f; ma_int64 size, start = 0, end; unsigned char b[64];
-    const wchar_t *dot = wcsrchr(path, L'.');
+    const nca_char *dot = nca_strrchr(path, NCA_T('.'));
     int hdrKbps = 0, cbrKnown = 0, vbrKnown = 0, kbps;
     if (seconds <= 0) return 0;
-    f = _wfopen(path, L"rb");
+    f = nca_fopen_rb(path);
     if (!f) return 0;
-    _fseeki64(f, 0, SEEK_END); size = _ftelli64(f); end = size;
+    nca_fseek64(f, 0, SEEK_END); size = nca_ftell64(f); end = size;
     /* leading ID3v2 (any format may carry one) */
     if (nca_read_at(f, 0, b, 10) == 10 && b[0] == 'I' && b[1] == 'D' && b[2] == '3')
         start = 10 + (((ma_int64)(b[6] & 0x7F) << 21) | ((b[7] & 0x7F) << 14) | ((b[8] & 0x7F) << 7) | (b[9] & 0x7F)) + ((b[5] & 0x10) ? 10 : 0);
@@ -634,7 +795,7 @@ static int nca_calc_bitrate(const wchar_t *path, double seconds)
         ma_int64 t = (ma_int64)rd_le32(b + 12) + ((b[23] & 0x80) ? 32 : 0);
         if (t > 0 && end - t > start) end -= t;
     }
-    if (dot && _wcsicmp(dot, L".flac") == 0) {
+    if (dot && nca_stricmp(dot, NCA_T(".flac")) == 0) {
         /* skip all metadata blocks (pictures, padding, seek tables...) */
         ma_int64 p = start;
         if (nca_read_at(f, p, b, 4) == 4 && memcmp(b, "fLaC", 4) == 0) {
@@ -646,7 +807,7 @@ static int nca_calc_bitrate(const wchar_t *path, double seconds)
             }
             if (p < end) start = p;
         }
-    } else if (dot && (_wcsicmp(dot, L".ogg") == 0 || _wcsicmp(dot, L".oga") == 0 || _wcsicmp(dot, L".opus") == 0)) {
+    } else if (dot && (nca_stricmp(dot, NCA_T(".ogg")) == 0 || nca_stricmp(dot, NCA_T(".oga")) == 0 || nca_stricmp(dot, NCA_T(".opus")) == 0)) {
         /* header pages (granule 0: id + comment headers, maybe with cover art) */
         ma_int64 p = start; int pages = 0;
         while (pages++ < 4096 && nca_read_at(f, p, b, 27 + 0) == 27 && memcmp(b, "OggS", 4) == 0) {
@@ -657,7 +818,7 @@ static int nca_calc_bitrate(const wchar_t *path, double seconds)
             for (i = 0; i < nseg; i++) body += seg[i];
             p += 27 + nseg + body;
         }
-    } else if (dot && (_wcsicmp(dot, L".m4a") == 0 || _wcsicmp(dot, L".mp4") == 0 || _wcsicmp(dot, L".m4b") == 0)) {
+    } else if (dot && (nca_stricmp(dot, NCA_T(".m4a")) == 0 || nca_stricmp(dot, NCA_T(".mp4")) == 0 || nca_stricmp(dot, NCA_T(".m4b")) == 0)) {
         /* sum of top-level 'mdat' atoms */
         ma_int64 p = 0, mdat = 0;
         while (p + 8 <= size && nca_read_at(f, p, b, 16) >= 8) {
@@ -669,7 +830,7 @@ static int nca_calc_bitrate(const wchar_t *path, double seconds)
             p += sz;
         }
         if (mdat > 0) { start = 0; end = mdat; }
-    } else if (dot && (_wcsicmp(dot, L".mp3") == 0 || _wcsicmp(dot, L".mp2") == 0)) {
+    } else if (dot && (nca_stricmp(dot, NCA_T(".mp3")) == 0 || nca_stricmp(dot, NCA_T(".mp2")) == 0)) {
         /* first frame header (resync over junk) + Xing / Info / VBRI tag */
         unsigned char buf[4096]; int n = nca_read_at(f, start, buf, sizeof buf), i;
         for (i = 0; i + 4 <= n; i++) {
@@ -709,29 +870,29 @@ static ma_uint64 nca_out_len(ma_decoder *d, ma_uint64 srcLen, ma_uint32 sr)
     return ma_calculate_frame_count_after_resampling(d->outputSampleRate, sr, srcLen);
 }
 
-static void nca_fill_info(ma_decoder *d, const wchar_t *path, nca_info *info, ma_uint64 len)
+static void nca_fill_info(ma_decoder *d, const nca_char *path, nca_info *info, ma_uint64 len)
 {
     ma_format f; ma_uint32 ch = 0, sr = 0;
-    const wchar_t *dot;
+    const nca_char *dot;
     memset(info, 0, sizeof(*info));
     if (d->pBackend) ma_data_source_get_data_format(d->pBackend, &f, &ch, &sr, NULL, 0);
     info->channels = (int)ch; info->sample_rate = (int)sr;
     if (sr && len) info->length = (double)len / sr;
     else info->length = -1;
     info->bitrate = nca_calc_bitrate(path, info->length);
-    dot = wcsrchr(path, L'.');
-    if (dot) { int i; for (i = 0; i < 15 && dot[i + 1]; i++) info->codec[i] = (char)towupper(dot[i + 1]); }
+    dot = nca_strrchr(path, NCA_T('.'));
+    if (dot) { int i; for (i = 0; i < 15 && dot[i + 1]; i++) info->codec[i] = (char)toupper((unsigned char)dot[i + 1]); }
 }
 
 /* open a file for playback; replaces the current one. 1 = ok */
-NCA_API int nca_open(const wchar_t *path, nca_info *info)
+NCA_API int nca_open(const nca_char *path, nca_info *info)
 {
     ma_decoder *d, *old; ma_decoder_config c; ma_result r;
     nca_setup();
     d = (ma_decoder*)malloc(sizeof(ma_decoder));
     if (!d) return 0;
     c = nca_cfg(1);
-    r = ma_decoder_init_file_w(path, &c, d);
+    r = nca_decoder_init_file(path, &c, d);
     if (r != MA_SUCCESS) { free(d); snprintf(g_err, sizeof g_err, "cannot decode (%s)", ma_result_description(r)); return 0; }
     {
         ma_uint32 sr = 0; ma_uint64 srcLen = nca_src_len(d, &sr), outLen = nca_out_len(d, srcLen, sr);
@@ -741,7 +902,8 @@ NCA_API int nca_open(const wchar_t *path, nca_info *info)
         g_lenFrames = outLen; g_endReason = 0;
     }
     old = g_dec; g_dec = d; g_state = NCA_STOPPED; g_decGen++;
-    wcsncpy(g_path, path, MAX_PATH * 4 - 1); g_path[MAX_PATH * 4 - 1] = 0;
+    nca_copy_path(g_path, path);
+
     LeaveCriticalSection(&g_cs);
     if (old) { ma_decoder_uninit(old); free(old); }
     return 1;
@@ -854,12 +1016,12 @@ NCA_API int nca_get_fft(float *out512)
 }
 
 /* duration / format of a file without playing it. 1 = ok */
-NCA_API int nca_probe(const wchar_t *path, nca_info *info)
+NCA_API int nca_probe(const nca_char *path, nca_info *info)
 {
     ma_decoder d; ma_decoder_config c;
     nca_setup();
     c = nca_cfg(0);
-    if (ma_decoder_init_file_w(path, &c, &d) != MA_SUCCESS) return 0;
+    if (nca_decoder_init_file(path, &c, &d) != MA_SUCCESS) return 0;
     nca_fill_info(&d, path, info, nca_src_len(&d, NULL));
     ma_decoder_uninit(&d);
     return 1;
@@ -875,13 +1037,46 @@ NCA_API void nca_uninit(void)
             nca_log("audio engine thread did not finish within 2 s (device operation '%s'), exiting anyway", g_opName);
         else { CloseHandle(g_engThread); g_engThread = NULL; }
     }
+#ifdef _WIN32
     if (g_mfStarted && !g_engThread) { pMFShutdown(); g_mfStarted = 0; }
+#endif
 }
 
 /* ------------------------------------------------------------------ */
 /* device robustness: follow the default endpoint, recover stopped /   */
 /* invalidated / silent-stuck devices                                 */
 /* ------------------------------------------------------------------ */
+#ifdef __APPLE__
+#include <CoreAudio/CoreAudio.h>
+/* UID (ASCII, widened into WCHAR) + liveness of the current default output device; 0 = none */
+static int nca_default_endpoint(WCHAR *id, int cap, DWORD *state)
+{
+    AudioObjectPropertyAddress a = { kAudioHardwarePropertyDefaultOutputDevice, kAudioObjectPropertyScopeGlobal, kAudioObjectPropertyElementMain };
+    AudioDeviceID dev = kAudioObjectUnknown; UInt32 sz = sizeof dev; CFStringRef uid = NULL; char u8[256]; int i, ok = 0;
+    if (g_testDefOn) {                  /* NCAMP_TEST_DEVICE: simulated endpoint ("" = none) */
+        if (!g_testDef[0]) return 0;
+        wcsncpy(id, g_testDef, cap - 1); id[cap - 1] = 0;
+        if (state) *state = DEVICE_STATE_ACTIVE;
+        return 1;
+    }
+    if (AudioObjectGetPropertyData(kAudioObjectSystemObject, &a, 0, NULL, &sz, &dev) != noErr || dev == kAudioObjectUnknown) return 0;
+    a.mSelector = kAudioDevicePropertyDeviceUID; a.mScope = kAudioObjectPropertyScopeGlobal; sz = sizeof uid;
+    if (AudioObjectGetPropertyData(dev, &a, 0, NULL, &sz, &uid) == noErr && uid) {
+        if (CFStringGetCString(uid, u8, sizeof u8, kCFStringEncodingUTF8)) {
+            for (i = 0; u8[i] && i < cap - 1; i++) id[i] = (WCHAR)(unsigned char)u8[i];
+            id[i] = 0; ok = 1;
+        }
+        CFRelease(uid);
+    }
+    if (ok && state) {
+        UInt32 alive = 1; sz = sizeof alive;
+        a.mSelector = kAudioDevicePropertyDeviceIsAlive;
+        if (AudioObjectGetPropertyData(dev, &a, 0, NULL, &sz, &alive) != noErr) alive = 1;
+        *state = alive ? DEVICE_STATE_ACTIVE : 0;
+    }
+    return ok;
+}
+#else
 static const GUID nca_CLSID_MMDeviceEnumerator = {0xBCDE0395, 0xE52F, 0x467C, {0x8E, 0x3D, 0xC4, 0x57, 0x92, 0x91, 0x69, 0x2E}};
 static const GUID nca_IID_IMMDeviceEnumerator  = {0xA95664D2, 0x9614, 0x4F35, {0xA7, 0x46, 0xDE, 0x8D, 0xB6, 0x36, 0x17, 0xE6}};
 
@@ -908,6 +1103,7 @@ static int nca_default_endpoint(WCHAR *id, int cap, DWORD *state)
     if (ci == S_OK || ci == S_FALSE) CoUninitialize();
     return ok;
 }
+#endif /* __APPLE__ / _WIN32 */
 
 static void nca_remember_endpoint(void)
 {
@@ -968,17 +1164,17 @@ NCA_API int nca_take_autopause(char *buf, int cap)
    the state and to swap). A track opened, closed or seeked by the UI meanwhile wins. */
 static void nca_rebuild_decoder(void)
 {
-    static wchar_t path[MAX_PATH * 4];
+    static nca_char path[NCA_MAXPATH];
     ma_decoder *d, *old; ma_decoder_config cfg; unsigned gen; ma_uint32 rate = g_devRate, sr = 0;
     ma_uint64 c = 0, srcLen, outLen, t; double posSec = 0;
     EnterCriticalSection(&g_cs);
     if (!g_dec || !g_path[0] || !rate || g_dec->outputSampleRate == rate) { LeaveCriticalSection(&g_cs); return; }
-    gen = g_decGen; wcscpy(path, g_path);
+    gen = g_decGen; nca_strcpy(path, g_path);
     if (ma_decoder_get_cursor_in_pcm_frames(g_dec, &c) == MA_SUCCESS && g_dec->outputSampleRate) posSec = (double)c / g_dec->outputSampleRate;
     LeaveCriticalSection(&g_cs);
     d = (ma_decoder*)malloc(sizeof(ma_decoder)); if (!d) return;
     cfg = nca_cfg(1);
-    if (ma_decoder_init_file_w(path, &cfg, d) != MA_SUCCESS) { free(d); nca_log("decoder rebuild for %u Hz failed", rate); return; }
+    if (nca_decoder_init_file(path, &cfg, d) != MA_SUCCESS) { free(d); nca_log("decoder rebuild for %u Hz failed", rate); return; }
     srcLen = nca_src_len(d, &sr); outLen = nca_out_len(d, srcLen, sr);
     ma_decoder_seek_to_pcm_frame(d, 0);
     EnterCriticalSection(&g_cs);
@@ -1178,7 +1374,7 @@ static void nca_engine_tick(void)
 {
     static ULONGLONG lastCheck = 0, lastEp = 0, t0 = 0; static LONG lastCb = 0; static int step = 0; static DWORD lastSt = DEVICE_STATE_ACTIVE;
     ULONGLONG now = GetTickCount64();
-    if (!t0) t0 = now;
+    if (!t0) t0 = lastCheck = lastEp = now;   /* first stall check 2 s after the thread starts, not at once */
     if (g_shuttingDown) return;
     if (!g_devOk) {              /* a reopen failed earlier: retry every 2 s */
         if (now - lastCheck >= 2000) { lastCheck = now; nca_reopen("retry"); }
@@ -1219,7 +1415,9 @@ static void nca_engine_tick(void)
 
 static DWORD WINAPI nca_engine_thread(LPVOID unused)
 {
+#ifdef _WIN32
     HRESULT ci = CoInitializeEx(NULL, COINIT_MULTITHREADED);
+#endif
     (void)unused;
     g_ownerThread = GetCurrentThreadId();
     if (nca_device_start_up()) { nca_remember_endpoint(); nca_describe(); }
@@ -1231,7 +1429,9 @@ static DWORD WINAPI nca_engine_thread(LPVOID unused)
     }
     nca_op("close at exit"); nca_device_close(1); nca_op(NULL);
     g_devOk = 0; g_devRate = 0;
+#ifdef _WIN32
     if (ci == S_OK || ci == S_FALSE) CoUninitialize();
+#endif
     return 0;
 }
 

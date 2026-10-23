@@ -1,0 +1,40 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>CFBundleName</key><string>nc-amp</string>
+  <key>CFBundleDisplayName</key><string>nc-amp</string>
+  <key>CFBundleExecutable</key><string>nc-amp</string>
+  <key>CFBundleIdentifier</key><string>io.github.shenmin.nc-amp</string>
+  <key>CFBundleIconFile</key><string>nc-amp</string>
+  <key>CFBundlePackageType</key><string>APPL</string>
+  <key>CFBundleShortVersionString</key><string>@VERSION@</string>
+  <key>CFBundleVersion</key><string>@VERSION@</string>
+  <key>CFBundleInfoDictionaryVersion</key><string>6.0</string>
+  <key>LSMinimumSystemVersion</key><string>11.0</string>
+  <key>NSHighResolutionCapable</key><true/>
+  <key>NSHumanReadableCopyright</key><string>Copyright (C) 2026 Shen Min - GPL-3.0-or-later</string>
+  <!-- no Dock icon and no menu bar of its own, like the Windows build has no taskbar button:
+       the menu bar status item and the right-click menu are the way to control it -->
+  <key>LSUIElement</key><true/>
+  <key>CFBundleDocumentTypes</key>
+  <array>
+    <dict>
+      <key>CFBundleTypeName</key><string>Audio</string>
+      <key>CFBundleTypeRole</key><string>Viewer</string>
+      <key>LSHandlerRank</key><string>Alternate</string>
+      <key>LSItemContentTypes</key>
+      <array>
+        <string>public.audio</string>
+        <string>public.mp3</string>
+        <string>org.xiph.flac</string>
+        <string>org.xiph.ogg-audio</string>
+        <string>com.microsoft.waveform-audio</string>
+        <string>public.aiff-audio</string>
+        <string>public.mpeg-4-audio</string>
+        <string>public.folder</string>
+      </array>
+    </dict>
+  </array>
+</dict>
+</plist>

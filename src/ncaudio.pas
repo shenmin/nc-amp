@@ -12,18 +12,33 @@
 unit NcAudio;
 {$mode objfpc}{$H+}
 
+{$IFDEF MSWINDOWS}
 { the engine objects (generated list), then the import libraries for what they use from
   kernel32.dll / ole32.dll / msvcrt.dll }
 {$I engine/objs.inc}
 {$LINKLIB libmsvcrt.a}
 {$LINKLIB libole32.a}
 {$LINKLIB libkernel32.a}
+{$ELSE}
+{ macOS: one static library built by scripts/build-engine-mac.sh (src/engine/lib-mac,
+  passed to the linker with -Fl), plus the system frameworks the engine uses }
+{$LINKLIB ncengine}
+{$LINKFRAMEWORK CoreAudio}
+{$LINKFRAMEWORK AudioToolbox}
+{$LINKFRAMEWORK CoreFoundation}
+{$ENDIF}
 
 interface
 
-uses Windows, SysUtils;
+uses {$IFDEF MSWINDOWS}Windows, {$ENDIF}SysUtils;
 
 type
+  { file paths of the engine: UTF-16 on Windows, UTF-8 on macOS }
+  {$IFDEF MSWINDOWS}
+  PNcPath = PWideChar;
+  {$ELSE}
+  PNcPath = PAnsiChar;
+  {$ENDIF}
   TNcaInfo = record
     SampleRate, Channels: Integer;
     Length: Double;          { seconds, <= 0 unknown }
@@ -37,7 +52,7 @@ const
 
 function nca_init: Integer; cdecl; external name 'nca_init';
 procedure nca_uninit; cdecl; external name 'nca_uninit';
-function nca_open(path: PWideChar; info: PNcaInfo): Integer; cdecl; external name 'nca_open';
+function nca_open(path: PNcPath; info: PNcaInfo): Integer; cdecl; external name 'nca_open';
 procedure nca_close; cdecl; external name 'nca_close';
 procedure nca_play; cdecl; external name 'nca_play';
 procedure nca_pause; cdecl; external name 'nca_pause';
@@ -49,7 +64,7 @@ function nca_seek(sec: Double): Integer; cdecl; external name 'nca_seek';
 procedure nca_set_volume(v: Single); cdecl; external name 'nca_set_volume';
 procedure nca_set_pan(p: Single); cdecl; external name 'nca_set_pan';
 function nca_get_fft(out512: PSingle): Integer; cdecl; external name 'nca_get_fft';
-function nca_probe(path: PWideChar; info: PNcaInfo): Integer; cdecl; external name 'nca_probe';
+function nca_probe(path: PNcPath; info: PNcaInfo): Integer; cdecl; external name 'nca_probe';
 function nca_version: PAnsiChar; cdecl; external name 'nca_version';
 function nca_error: PAnsiChar; cdecl; external name 'nca_error';
 { diagnostics (1.7.2+) }
@@ -64,6 +79,9 @@ var
   AudioReady: Boolean = False;      { output device running }
   AudioError: string = '';
 
+{ open / probe a file given its UTF-8 path (converted to the engine's path type) }
+function nca_open_utf8(const PathUtf8: string; info: PNcaInfo): Integer;
+function nca_probe_utf8(const PathUtf8: string; info: PNcaInfo): Integer;
 function LoadAudio: Boolean;
 procedure UnloadAudio;
 function AudioVersion: string;
@@ -71,6 +89,34 @@ function AudioVersion: string;
 function AudioTakeLog: string;
 
 implementation
+
+function nca_open_utf8(const PathUtf8: string; info: PNcaInfo): Integer;
+{$IFDEF MSWINDOWS}
+var
+  w: UnicodeString;
+begin
+  w := UTF8Decode(PathUtf8);
+  Result := nca_open(PWideChar(w), info);
+end;
+{$ELSE}
+begin
+  Result := nca_open(PAnsiChar(PathUtf8), info);
+end;
+{$ENDIF}
+
+function nca_probe_utf8(const PathUtf8: string; info: PNcaInfo): Integer;
+{$IFDEF MSWINDOWS}
+var
+  w: UnicodeString;
+begin
+  w := UTF8Decode(PathUtf8);
+  Result := nca_probe(PWideChar(w), info);
+end;
+{$ELSE}
+begin
+  Result := nca_probe(PAnsiChar(PathUtf8), info);
+end;
+{$ENDIF}
 
 function LoadAudio: Boolean;
 begin

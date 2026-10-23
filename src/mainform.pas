@@ -9,7 +9,8 @@ unit MainForm;
 interface
 
 uses
-  Windows, Messages, Classes, SysUtils, Math, Forms, Controls, Graphics,
+  {$IFDEF MSWINDOWS}Windows, Messages,{$ELSE}LCLIntf, BaseUnix, NcMac,{$ENDIF}
+  Classes, SysUtils, Math, Forms, Controls, Graphics,
   Dialogs, ExtCtrls, Menus, LCLType, LMessages, FileUtil, LazFileUtils, LazUTF8, IniFiles,
   NcAudio, TagReader, TitleFont, NcTray, SingleInst, FolderPick, NcTip;
 
@@ -324,13 +325,22 @@ var
 begin
   for i := 0 to High(Names) do
     if Screen.Fonts.IndexOf(Names[i]) >= 0 then Exit(Names[i]);
-  Result := 'Tahoma';
+  {$IFDEF MSWINDOWS}Result := 'Tahoma';{$ELSE}Result := 'Helvetica Neue';{$ENDIF}
 end;
 
+{$IFDEF MSWINDOWS}
 function AddFontMemResourceEx(pbFont: Pointer; cbFont: DWORD; pdv: Pointer;
   pcFonts: PDWORD): THandle; stdcall; external 'gdi32.dll';
+{$ENDIF}
 
 { load the embedded LCD font privately; returns its GDI face name or '' }
+{$IFNDEF MSWINDOWS}
+{ macOS: the font file sits in the app bundle's Resources and is registered for this process only }
+function LoadLcdFont: string;
+begin
+  Result := MacRegisterBundledFont('IBMPlexMono-Medium.ttf', ['IBM Plex Mono Medium', 'IBMPlexMono-Medium', 'IBM Plex Mono']);
+end;
+{$ELSE}
 function LoadLcdFont: string;
 var
   rs: THandle; hg: HGLOBAL; n: DWORD; f: HFONT; dc: HDC; old: HGDIOBJ;
@@ -360,6 +370,7 @@ begin
     ReleaseDC(0, dc);
   end;
 end;
+{$ENDIF}
 
 procedure FillC(c: TCanvas; const r: TRect; col: TColor);
 begin
@@ -491,11 +502,20 @@ begin
   end;
 end;
 
+type
+  TNcTM = {$IFDEF MSWINDOWS}Windows.TTextMetric{$ELSE}LCLType.TTextMetric{$ENDIF};
+
+procedure NcGetTM(c: TCanvas; out tm: TNcTM);
+begin
+  FillChar(tm, SizeOf(tm), 0);
+  {$IFDEF MSWINDOWS}Windows.{$ELSE}LCLIntf.{$ENDIF}GetTextMetrics(c.Handle, tm);
+end;
+
 function LcdAscent(c: TCanvas): Integer;
 var
-  tm: Windows.TTextMetric;
+  tm: TNcTM;
 begin
-  Windows.GetTextMetrics(c.Handle, tm);
+  NcGetTM(c, tm);
   Result := tm.tmAscent;
 end;
 
@@ -515,11 +535,11 @@ end;
 { height of a line in device px (for vertical centring) and the baseline offset }
 procedure LcdMetrics(c: TCanvas; hLogical: Double; out LineH, Base: Integer);
 var
-  tm: Windows.TTextMetric; aL, dL, aC, dC: Integer;
+  tm: TNcTM; aL, dL, aC, dC: Integer;
 begin
-  SetLcdFont(c, True, hLogical); Windows.GetTextMetrics(c.Handle, tm);
+  SetLcdFont(c, True, hLogical); NcGetTM(c, tm);
   aL := tm.tmAscent - tm.tmInternalLeading div 2; dL := tm.tmDescent;
-  SetLcdFont(c, False, hLogical); Windows.GetTextMetrics(c.Handle, tm);
+  SetLcdFont(c, False, hLogical); NcGetTM(c, tm);
   aC := tm.tmAscent - tm.tmInternalLeading div 2; dC := tm.tmDescent;
   Base := Max(aL, aC);
   LineH := Base + Max(dL, dC);
@@ -547,13 +567,13 @@ end;
 procedure LcdInRect(c: TCanvas; const r: TRect; x: Integer; const s: string; hLogical: Double; col: TColor);
 var
   lh, b: Integer;
-  tm: Windows.TTextMetric;
+  tm: TNcTM;
 begin
   if (Length(SplitRuns(s)) = 1) and SplitRuns(s)[0].Latin then
   begin
     { Latin only: centre the cap height }
     SetLcdFont(c, True, hLogical);
-    Windows.GetTextMetrics(c.Handle, tm);
+    NcGetTM(c, tm);
     lh := tm.tmAscent - tm.tmInternalLeading; b := lh;
   end
   else
@@ -671,7 +691,7 @@ const
 { 7-segment digit in logical units }
 procedure DrawDigitL(c: TCanvas; lx, ly, lw_, lh, lt: Double; mask: Byte; OnCol, OffCol: TColor);
 var
-  x, y, w, h, t, hm: Integer;
+  x, y, w, h, t, hm, gx: Integer;
   procedure Seg(bit: Integer; x1, y1, x2, y2: Integer);
   begin
     if (mask and (1 shl bit)) <> 0 then c.Brush.Color := OnCol else c.Brush.Color := OffCol;
@@ -680,14 +700,22 @@ var
 begin
   x := P(lx); y := P(ly); w := P(lw_); h := P(lh);
   t := Max(1, Round(lt * G));
+  gx := 0;
+  {$IFNDEF MSWINDOWS}
+  { macOS: the default size is a fractional scale on a 1x screen (stroke 1.56 px -> 2 px), where the
+    gap between the upper and the lower vertical strokes (the height of the middle bar, also 2 px) leaves
+    only 3 px strokes and the digits read as broken. Let the upper strokes run into the middle bar's rows
+    so that only a 1 px gap remains, as in the 96 dpi Windows digits. }
+  gx := t - 1;
+  {$ENDIF}
   c.Brush.Style := bsSolid;
   hm := y + (h - t) div 2;
   Seg(0, x + t, y, x + w - t, y + t);
-  Seg(1, x + w - t, y + t, x + w, hm);
+  Seg(1, x + w - t, y + t, x + w, hm + gx);
   Seg(2, x + w - t, hm + t, x + w, y + h - t);
   Seg(3, x + t, y + h - t, x + w - t, y + h);
   Seg(4, x, hm + t, x + t, y + h - t);
-  Seg(5, x, y + t, x + t, hm);
+  Seg(5, x, y + t, x + t, hm + gx);
   Seg(6, x + t, hm, x + w - t, hm + t);
 end;
 
@@ -720,6 +748,14 @@ begin
   end;
 end;
 
+{$IFNDEF MSWINDOWS}
+{ macOS: windows are laid out in points; the Retina backing scale is applied only when drawing
+  (see FormPaint), so the "DPI" the layout code works with is always 96 }
+function SystemDpi: Integer; begin Result := 96; end;
+function WindowDpi(h: HWND): Integer; begin Result := 96; end;
+function DpiAtPoint(const pt: TPoint): Integer; begin Result := 96; end;
+function AwarenessName: string; begin Result := 'points (backing scale applied at paint)'; end;
+{$ELSE}
 type
   TGetDpiForWindow = function(h: HWND): UINT; stdcall;
   TGetDpiForMonitor = function(hmon: HMONITOR; dpiType: Integer; out dpiX, dpiY: UINT): HRESULT; stdcall;
@@ -803,6 +839,14 @@ begin
     end;
   end;
 end;
+{$ENDIF}
+
+{$IFDEF MSWINDOWS}
+function BackingScaleOf(F: TCustomForm): Double;
+begin
+  Result := 1;   { Windows: windows are in device pixels already (per-monitor DPI) }
+end;
+{$ENDIF}
 
 { ===================== TPlaylistForm ===================== }
 
@@ -836,12 +880,20 @@ begin
 end;
 
 procedure TPlaylistForm.PaintIt(Sender: TObject);
+var
+  R: Double;
+  bw, bh: Integer;
 begin
-  if (FBuf.Width <> ClientWidth) or (FBuf.Height <> ClientHeight) then
-    FBuf.SetSize(Max(1, ClientWidth), Max(1, ClientHeight));
+  R := BackingScaleOf(Self);   { 1 on Windows; Retina factor of the window's screen on macOS }
+  bw := Max(1, Round(ClientWidth * R)); bh := Max(1, Round(ClientHeight * R));
+  if (FBuf.Width <> bw) or (FBuf.Height <> bh) then FBuf.SetSize(bw, bh);
   G := FOwnerMain.FScalePL;
-  FOwnerMain.DrawPlaylist(FBuf.Canvas, Round(ClientHeight / G));
-  Canvas.Draw(0, 0, FBuf);
+  bh := Round(ClientHeight / G);
+  G := FOwnerMain.FScalePL * R;
+  {$IFNDEF MSWINDOWS}MacLightText(FBuf.Canvas);{$ENDIF}
+  FOwnerMain.DrawPlaylist(FBuf.Canvas, bh);
+  G := FOwnerMain.FScalePL;
+  {$IFDEF MSWINDOWS}Canvas.Draw(0, 0, FBuf);{$ELSE}Canvas.StretchDraw(ClientRect, FBuf);{$ENDIF}
 end;
 
 procedure TPlaylistForm.MouseDown(Button: TMouseButton; Shift: TShiftState; X, Y: Integer);
@@ -874,8 +926,10 @@ begin
     Exit;
   end;
   inherited WndProc(TheMessage);
+  {$IFDEF MSWINDOWS}
   if TheMessage.Msg = WM_GETMINMAXINFO then
     with PMinMaxInfo(TheMessage.LParam)^ do ptMinTrackSize := Classes.Point(1, 1);
+  {$ENDIF}
 end;
 
 { ===================== TMainForm: setup / scaling ===================== }
@@ -930,6 +984,7 @@ begin
   StartIpcServer(@IpcRequest);   { second instances forward their files here }
   Application.OnEndSession := @AppEndSession;
   Application.OnQueryEndSession := @AppQueryEndSession;
+  {$IFNDEF MSWINDOWS}MacObserveShutdown(@AppEndSession);{$ENDIF}   { sleep / power off / quit: save state }
   LoadState;
 
   SetLength(args, 0);
@@ -974,8 +1029,12 @@ var
 begin
   if ShownOnce then Exit;
   ShownOnce := True;
+  {$IFDEF MSWINDOWS}
   st := GetWindowLongPtr(Handle, GWL_STYLE);
   SetWindowLongPtr(Handle, GWL_STYLE, st or WS_MINIMIZEBOX or WS_SYSMENU);
+  {$ELSE}
+  st := 0;
+  {$ENDIF}
   ok := HaveSavedPos and (SavedMainPos.X > Screen.DesktopLeft - 100) and
      (SavedMainPos.X < Screen.DesktopLeft + Screen.DesktopWidth - 50) and
      (SavedMainPos.Y > Screen.DesktopTop - 20) and
@@ -1032,12 +1091,18 @@ begin
 end;
 
 procedure TMainForm.FormPaint(Sender: TObject);
+var
+  R: Double;
+  bw, bh: Integer;
 begin
-  if (FBuf.Width <> ClientWidth) or (FBuf.Height <> ClientHeight) then
-    FBuf.SetSize(Max(1, ClientWidth), Max(1, ClientHeight));
-  G := FScaleMain;
+  R := BackingScaleOf(Self);   { 1 on Windows; Retina factor of the window's screen on macOS }
+  bw := Max(1, Round(ClientWidth * R)); bh := Max(1, Round(ClientHeight * R));
+  if (FBuf.Width <> bw) or (FBuf.Height <> bh) then FBuf.SetSize(bw, bh);
+  G := FScaleMain * R;
+  {$IFNDEF MSWINDOWS}MacLightText(FBuf.Canvas);{$ENDIF}
   DrawMain(FBuf.Canvas);
-  Canvas.Draw(0, 0, FBuf);
+  G := FScaleMain;
+  {$IFDEF MSWINDOWS}Canvas.Draw(0, 0, FBuf);{$ELSE}Canvas.StretchDraw(ClientRect, FBuf);{$ENDIF}
 end;
 
 procedure TMainForm.InvalidateAll;
@@ -1197,6 +1262,7 @@ begin
     TheMessage.Result := 0;
     Exit;
   end;
+  {$IFDEF MSWINDOWS}
   { logoff / shutdown / restart: the process may be killed without FormDestroy }
   if TheMessage.Msg = WM_QUERYENDSESSION then
   begin
@@ -1215,11 +1281,14 @@ begin
     TheMessage.Result := 0;
     Exit;
   end;
+  {$ENDIF}
   inherited WndProc(TheMessage);
+  {$IFDEF MSWINDOWS}
   { never let Windows clamp our custom sizes (e.g. the thin shade bar) to a
     minimum tracking size }
   if TheMessage.Msg = WM_GETMINMAXINFO then
     with PMinMaxInfo(TheMessage.LParam)^ do ptMinTrackSize := Classes.Point(1, 1);
+  {$ENDIF}
 end;
 
 procedure TMainForm.SetSizeMul(M: Double);
@@ -1259,6 +1328,55 @@ begin
   Result.Cap := Cap; Result.Id := Id; Result.Checked := Checked; Result.Def := Def;
 end;
 
+{$IFNDEF MSWINDOWS}
+type
+  TPopupPick = class
+    Id: Integer;
+    procedure Click(Sender: TObject);
+  end;
+
+procedure TPopupPick.Click(Sender: TObject);
+begin
+  Id := TMenuItem(Sender).Tag;
+end;
+
+{ macOS: a native NSMenu (LCL TPopupMenu), system font. Returns the chosen id or 0. }
+function NativePopup(Owner: HWND; const Items: array of TNMItem; FromTray: Boolean; AtX: Integer = MaxInt; AtY: Integer = MaxInt): Integer;
+var
+  pm: TPopupMenu;
+  mi: TMenuItem;
+  pick: TPopupPick;
+  i: Integer;
+  pt: TPoint;
+begin
+  pick := TPopupPick.Create;
+  pm := TPopupMenu.Create(nil);
+  try
+    for i := 0 to High(Items) do
+    begin
+      mi := TMenuItem.Create(pm);
+      if Items[i].Cap = '-' then mi.Caption := '-'
+      else
+      begin
+        mi.Caption := Items[i].Cap;
+        mi.Tag := Items[i].Id;
+        mi.Checked := Items[i].Checked;
+        mi.OnClick := @pick.Click;
+      end;
+      pm.Items.Add(mi);
+    end;
+    if AtX = MaxInt then pt := Mouse.CursorPos else pt := Point(AtX, AtY);
+    DebugLog(Format('popup: tray=%s at %d,%d', [BoolToStr(FromTray, True), pt.X, pt.Y]));
+    pick.Id := 0;
+    pm.PopUp(pt.X, pt.Y);   { returns when the menu is dismissed }
+    Application.ProcessMessages;   { the chosen item's action may still be queued }
+    Result := pick.Id;
+  finally
+    pm.Free;
+    pick.Free;
+  end;
+end;
+{$ELSE}
 { Plain Win32 popup menu: no owner-draw, no custom font. Returns the chosen id or 0. }
 function NativePopup(Owner: HWND; const Items: array of TNMItem; FromTray: Boolean; AtX: Integer = MaxInt; AtY: Integer = MaxInt): Integer;
 var
@@ -1302,13 +1420,18 @@ begin
     DestroyMenu(hm);
   end;
 end;
+{$ENDIF}
 
 procedure TMainForm.ShowMainMenu;
 var
   id: Integer;
 begin
   id := NativePopup(Handle, [
+    {$IFDEF MSWINDOWS}
     NM('Size 1x (follows Windows display scaling)', 1, SameValue(FSizeMul, 1.0)),
+    {$ELSE}
+    NM('Size 1x (follows macOS display scaling)', 1, SameValue(FSizeMul, 1.0)),
+    {$ENDIF}
     NM('Size 1.5x', 2, SameValue(FSizeMul, 1.5)),
     NM('Size 2x', 3, SameValue(FSizeMul, 2.0)),
     NM('-', 0),
@@ -1364,8 +1487,12 @@ begin
   end
   else
     s := s + 'Drop music files or folders on the window to play them (shuffled, looping).';
-  { native message box: system message font, DPI-scaled by Windows }
+  { native message box: system message font, DPI-scaled by the OS }
+  {$IFDEF MSWINDOWS}
   MessageBoxW(Handle, PWideChar(UTF8Decode(s)), PWideChar(UTF8Decode(APPNAME)), MB_OK or MB_ICONINFORMATION);
+  {$ELSE}
+  Application.MessageBox(PChar(s), PChar(APPNAME), MB_OK or MB_ICONINFORMATION);
+  {$ENDIF}
 end;
 
 { ===================== drawing: main window ===================== }
@@ -2384,6 +2511,7 @@ begin
 end;
 
 function TMainForm.AppVisibleAndActive: Boolean;
+{$IFDEF MSWINDOWS}
 var
   fg: HWND;
 begin
@@ -2391,6 +2519,11 @@ begin
   Result := Visible and ((fg = Handle) or (FPL.HandleAllocated and (fg = FPL.Handle))
     or (GetTickCount64 - FDeactTick < 700));
 end;
+{$ELSE}
+begin
+  Result := Visible and MacAppActive;
+end;
+{$ENDIF}
 
 procedure TMainForm.ShowApp;
 begin
@@ -2398,7 +2531,11 @@ begin
   if FShowPL and not FPL.Visible then FPL.Show;
   if FShowPL then FPL.BringToFront;
   BringToFront;
+  {$IFDEF MSWINDOWS}
   SetForegroundWindow(Handle);
+  {$ELSE}
+  MacActivateApp;
+  {$ENDIF}
   DebugLog('tray: show');
 end;
 
@@ -2429,7 +2566,9 @@ begin
   if mo = 0 then mo := Handle;
   id := NativePopup(mo, [NM(pp, 1), NM('Next', 2), NM('Previous', 3), NM('Stop', 4),
     NM('-', 0), NM(sh, 5), NM('-', 0), NM('Exit', 6)], True, X, Y);
+  {$IFDEF MSWINDOWS}
   if mo <> Handle then DestroyWindow(mo);
+  {$ENDIF}
   case id of
     1: if FState = psStopped then PlayPressed else TogglePause;
     2: NextTrack(False);
@@ -2729,16 +2868,14 @@ end;
 
 procedure TMainForm.PlayIndex(i: Integer; StartAt: Double; StartPaused: Boolean);
 var
-  w: UnicodeString;
   info: TNcaInfo;
   t: string;
 begin
   if (i < 0) or (i >= FCount) or not AudioLoaded then Exit;
   FCur := i;
   EnsureVisible(i);
-  w := UTF8Decode(FTracks[i].Path);
   FillChar(info, SizeOf(info), 0);
-  FStream := nca_open(PWideChar(w), @info) <> 0;
+  FStream := nca_open_utf8(FTracks[i].Path, @info) <> 0;
   if not FStream then
   begin
     DebugLog('cannot play ' + FTracks[i].Path + ': ' + string(nca_error()));
@@ -3017,9 +3154,14 @@ begin
   try
     { NCAMP_TEST_FOLDERS=dir1|dir2|...: test hook that stands in for the dialog's result
       array, so the multi-folder add path can be exercised without UI automation }
+    {$IFDEF MSWINDOWS}
     SetLength(wtest, 8192);
     SetLength(wtest, Windows.GetEnvironmentVariableW('NCAMP_TEST_FOLDERS', PWideChar(wtest), 8192));
     test := UTF8Encode(wtest);
+    {$ELSE}
+    wtest := '';
+    test := GetEnvironmentVariable('NCAMP_TEST_FOLDERS');
+    {$ENDIF}
     if test <> '' then
     begin
       sl.Delimiter := '|'; sl.StrictDelimiter := True; sl.DelimitedText := test;
@@ -3276,13 +3418,22 @@ end;
 
 function TMainForm.ConfigDir: string;
 var
+  {$IFDEF MSWINDOWS}
   buf: array[0..1023] of WideChar;
   n: DWORD;
+  {$ENDIF}
   base, old: string;
 begin
+  {$IFDEF MSWINDOWS}
   n := GetEnvironmentVariableW('LOCALAPPDATA', @buf[0], Length(buf));
   if (n > 0) and (n < Length(buf)) then base := UTF8Encode(UnicodeString(PWideChar(@buf[0])))
   else base := ExtractFilePath(ParamStr(0));
+  {$ELSE}
+  { per-user settings: ~/Library/Application Support/nc-amp/ (the %LOCALAPPDATA% equivalent) }
+  base := GetEnvironmentVariable('HOME');
+  if base <> '' then base := IncludeTrailingPathDelimiter(base) + 'Library/Application Support'
+  else base := ExtractFilePath(ParamStr(0));
+  {$ENDIF}
   base := IncludeTrailingPathDelimiter(base);
   Result := base + APPNAME + PathDelim;
   if not DirectoryExists(Result) then
@@ -3290,8 +3441,12 @@ begin
     ForceDirectories(Result);
     { migrate settings from the earlier "RetroAmp" build }
     old := base + 'RetroAmp' + PathDelim;
+    {$IFDEF MSWINDOWS}
     if FileExists(old + 'playlist.m3u8') then CopyFile(old + 'playlist.m3u8', Result + 'playlist.m3u8');
     if FileExists(old + 'retroamp.ini') then CopyFile(old + 'retroamp.ini', Result + 'nc-amp.ini');
+    {$ELSE}
+    old := '';   { no earlier macOS build to migrate from }
+    {$ENDIF}
   end;
 end;
 
@@ -3313,8 +3468,12 @@ begin
   tmp := fn + '.tmp';
   L.WriteBOM := False;
   L.SaveToFile(tmp);
+  {$IFDEF MSWINDOWS}
   Result := MoveFileExW(PWideChar(UTF8Decode(tmp)), PWideChar(UTF8Decode(fn)),
     MOVEFILE_REPLACE_EXISTING or $8 { MOVEFILE_WRITE_THROUGH });
+  {$ELSE}
+  Result := fpRename(tmp, fn) = 0;   { rename(2) replaces atomically }
+  {$ENDIF}
   if not Result then DeleteFile(tmp);
 end;
 
