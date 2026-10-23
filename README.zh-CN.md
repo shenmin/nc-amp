@@ -16,7 +16,7 @@ nc-amp —— 基于 Free Pascal/Lazarus 的原生开源音乐播放器，支持
 - **Windows（64 位）与 macOS（Apple 芯片）**：同一套代码，两个平台的播放器、皮肤和快捷键完全一致。
 - **单文件绿色版**：Windows x64 下一个 exe、macOS 下一个独立的 app 即可运行，无需安装，不产生额外文件。
 - **支持格式**：MP3、FLAC、APE（Monkey's Audio）、WAV、Ogg Vorbis、Opus、M4A / AAC（AAC 使用系统自带解码器：Windows 的 Media Foundation、macOS 的 AudioToolbox；macOS 上还可播放 ALAC、AIFF、CAF）；整轨镜像可配合 CUE 分轨（`.cue`）；播放列表为 M3U / M3U8。
-- **CUE 分轨**：添加 `.cue` 文件（添加文件、拖放、文件夹扫描、命令行、从资源管理器 / Finder 打开）后，其中每个音轨成为播放列表中独立的一行，标题取自 CUE 的“演唱者 - 标题”，各有自己的时长、进度条和自动切歌。支持对应 FLAC、APE、WAV、MP3 等文件的 CUE、一个 CUE 内多个 `FILE`、相对路径，以及 UTF-8（带或不带 BOM）、UTF-16、GBK / GB18030（中文 CUE）编码。扫描文件夹时，已被文件夹内 CUE 拆分的音频文件不会再作为整轨重复添加。
+- **CUE 分轨**：添加 `.cue` 文件（添加文件、拖放、文件夹扫描、命令行、从资源管理器 / Finder 打开）后，其中每个音轨成为播放列表中独立的一行，标题取自 CUE 的“演唱者 - 标题”，各有自己的时长、进度条和自动切歌。支持对应 FLAC、APE、WAV、MP3 等文件的 CUE、一个 CUE 内多个 `FILE`、相对路径，以及 UTF-8（带或不带 BOM）、UTF-16、GBK / GB18030（中文 CUE）编码。添加音频文件（`.ape`、`.flac`、`.wav`、`.mp3`、`.m4a` 等）时，如果同一文件夹里有同名 CUE（`album.ape` + `album.cue` 或 `album.ape.cue`，不区分大小写）并且其中的 `FILE` 指向该文件，就会添加 CUE 的各个音轨，而不是整轨文件；同时添加音频和 CUE，或扫描含两者的文件夹，音轨也只会添加一次。无法解析或没有指向该文件的 CUE 会被忽略。
 - **保存 / 载入播放列表**：“Save playlist...” / “Load playlist...”（右键菜单和播放列表的 ADD 菜单）读写标准 `.m3u8`（UTF-8）文件，包含 CUE 音轨；位于播放列表所在文件夹之下的文件按相对路径保存。
 - **拖入即播**：把文件或文件夹（递归扫描）拖到任一窗口，立即开始播放。
 - **永远随机 + 循环**：每轮每首只播一次，播完后重新洗牌；新一轮不会以刚播完的曲目开头。

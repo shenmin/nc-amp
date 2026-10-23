@@ -13,7 +13,7 @@ unit CueSheet;
 
 interface
 
-uses SysUtils, Classes;
+uses SysUtils, Classes, LazFileUtils;
 
 type
   TCueTrack = record
@@ -38,6 +38,10 @@ function CueTimeToSec(const S: string): Double;
 { find the audio file a FILE line names: as written (relative to the sheet's folder), with the
   path separators fixed, or the same name with another audio extension }
 function ResolveCueAudio(const CueDir, Name: string): string;
+{ the CUE sheet next to an audio file (same base name: album.cue or album.ape.cue, any case) that names
+  this file - or the same base name with another extension - in a FILE line and has playable tracks;
+  '' if there is none (or it cannot be parsed). Tracks = what the sheet splits the file into. }
+function FindCueForAudio(const Audio: string; out Tracks: TCueTracks): string;
 
 implementation
 
@@ -380,6 +384,74 @@ begin
     if Tracks[n].Performer = '' then Tracks[n].Performer := albumPerf;
     Inc(n);
   end;
+end;
+
+function CueNamesAudio(const Text, CueDir, Audio: string): Boolean;
+var
+  lines: TStringList;
+  i: Integer;
+  cmd, rest, nm, res, want: string;
+begin
+  Result := False;
+  want := LowerCase(ChangeFileExt(ExtractFileName(Audio), ''));
+  lines := TStringList.Create;
+  try
+    lines.Text := StringReplace(StringReplace(Text, #13#10, #10, [rfReplaceAll]), #13, #10, [rfReplaceAll]);
+    for i := 0 to lines.Count - 1 do
+    begin
+      SplitCmd(Trim(lines[i]), cmd, rest);
+      if cmd <> 'FILE' then Continue;
+      nm := CueFileName(rest);
+      res := ResolveCueAudio(CueDir, nm);
+      if (res <> '') and SameText(ExpandFileName(res), ExpandFileName(Audio)) then Exit(True);
+      { the sheet says album.wav, the file is album.ape (and a WAV may exist too) }
+      if (res <> '') and (LowerCase(ChangeFileExt(ExtractFileName(FixSeparators(nm)), '')) = want) then Exit(True);
+    end;
+  finally
+    lines.Free;
+  end;
+end;
+
+function FindCueForAudio(const Audio: string; out Tracks: TCueTracks): string;
+var
+  dir, name, base, ln, txt, found: string;
+  sr: TSearchRec;
+  cand: TStringList;
+  i, skipped: Integer;
+begin
+  Result := '';
+  SetLength(Tracks, 0);
+  dir := ExtractFilePath(ExpandFileName(Audio));
+  name := LowerCase(ExtractFileName(Audio));
+  base := LowerCase(ChangeFileExt(ExtractFileName(Audio), ''));
+  cand := TStringList.Create;
+  try
+    if FindFirstUTF8(dir + '*', faAnyFile, sr) = 0 then
+    try
+      repeat
+        if (sr.Attr and faDirectory) <> 0 then Continue;
+        ln := LowerCase(sr.Name);
+        if (ln = base + '.cue') or (ln = name + '.cue') then cand.Add(dir + sr.Name);
+      until FindNextUTF8(sr) <> 0;
+    finally
+      FindCloseUTF8(sr);
+    end;
+    cand.Sort;
+    for i := 0 to cand.Count - 1 do
+    begin
+      if not LoadTextFile(cand[i], txt) then Continue;
+      if not CueNamesAudio(txt, dir, Audio) then Continue;
+      if ParseCueText(txt, dir, Tracks, skipped) and (Length(Tracks) > 0) then
+      begin
+        found := cand[i];
+        Break;
+      end;
+    end;
+  finally
+    cand.Free;
+  end;
+  if found = '' then SetLength(Tracks, 0);
+  Result := found;
 end;
 
 function ParseCueFile(const FileName: string; out Tracks: TCueTracks; out Skipped: Integer): Boolean;

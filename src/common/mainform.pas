@@ -2873,43 +2873,78 @@ end;
 function TMainForm.AddPaths(const Paths: array of string): Integer;
 var
   i, j, k, oldCount, p, t, sk: Integer;
-  L, Owned: TStringList;
+  L, Owned, Done, Covered: TStringList;
   ents: TPlEntries;
   tr: TCueTracks;
-  ext: string;
+  ext, cue: string;
+
+  { each CUE sheet is added once, however many ways lead to it (the sheet itself, the audio file next to
+    it, a folder that holds both) }
+  procedure AddCueOnce(const fn: string);
+  var
+    key: string;
+  begin
+    key := LowerCase(ExpandFileName(fn));
+    if Done.IndexOf(key) >= 0 then Exit;
+    Done.Add(key);
+    AddCueFile(fn);
+  end;
+
 begin
   oldCount := FCount;
-  for i := 0 to High(Paths) do
-  begin
-    if DirectoryExists(Paths[i]) then
+  Done := TStringList.Create;
+  Covered := TStringList.Create;      { audio files that a CUE sheet given in Paths already covers }
+  try
+    for i := 0 to High(Paths) do
+      if (LowerCase(ExtractFileExt(Paths[i])) = '.cue') and FileExists(Paths[i]) and ParseCueFile(Paths[i], tr, sk) then
+        for k := 0 to High(tr) do Covered.Add(LowerCase(tr[k].Audio));
+    for i := 0 to High(Paths) do
     begin
-      L := FindAllFiles(Paths[i], AUDIO_MASK, True);
-      Owned := TStringList.Create;      { audio files that a CUE sheet in the list splits into tracks }
-      try
-        L.Sort;
-        for j := 0 to L.Count - 1 do
-          if LowerCase(ExtractFileExt(L[j])) = '.cue' then
-            if ParseCueFile(L[j], tr, sk) then
-              for k := 0 to High(tr) do Owned.Add(LowerCase(tr[k].Audio));
-        for j := 0 to L.Count - 1 do
-          if LowerCase(ExtractFileExt(L[j])) = '.cue' then AddCueFile(L[j])
-          else if Owned.IndexOf(LowerCase(ExpandFileName(L[j]))) < 0 then AddOne(L[j]);
-      finally
-        Owned.Free;
-        L.Free;
+      if DirectoryExists(Paths[i]) then
+      begin
+        L := FindAllFiles(Paths[i], AUDIO_MASK, True);
+        Owned := TStringList.Create;      { audio files that a CUE sheet in the folder splits into tracks }
+        try
+          L.Sort;
+          for j := 0 to L.Count - 1 do
+            if LowerCase(ExtractFileExt(L[j])) = '.cue' then
+              if ParseCueFile(L[j], tr, sk) then
+                for k := 0 to High(tr) do Owned.Add(LowerCase(tr[k].Audio));
+          for j := 0 to L.Count - 1 do
+            if LowerCase(ExtractFileExt(L[j])) = '.cue' then AddCueOnce(L[j])
+            else if Owned.IndexOf(LowerCase(ExpandFileName(L[j]))) < 0 then AddOne(L[j]);
+        finally
+          Owned.Free;
+          L.Free;
+        end;
+      end
+      else if FileExists(Paths[i]) and (IsAudioFile(Paths[i]) or
+        (LowerCase(ExtractFileExt(Paths[i])) = '.m3u') or (LowerCase(ExtractFileExt(Paths[i])) = '.m3u8')) then
+      begin
+        ext := LowerCase(ExtractFileExt(Paths[i]));
+        if Pos('.m3u', ext) = 1 then
+          LoadPlaylistFile(Paths[i])
+        else if ext = '.cue' then
+          AddCueOnce(Paths[i])
+        else if Covered.IndexOf(LowerCase(ExpandFileName(Paths[i]))) >= 0 then
+          DebugLog('cue: ' + Paths[i] + ' is covered by a CUE sheet that was added with it')
+        else
+        begin
+          { album.ape + album.cue (or album.ape.cue) next to it that names this file: add the tracks instead }
+          cue := FindCueForAudio(Paths[i], tr);
+          if cue <> '' then
+          begin
+            DebugLog(Format('cue: %s has %s next to it: adding its %d track(s) instead', [Paths[i], ExtractFileName(cue), Length(tr)]));
+            AddCueOnce(cue);
+          end
+          else
+            AddOne(Paths[i]);
+        end;
       end;
-    end
-    else if FileExists(Paths[i]) and (IsAudioFile(Paths[i]) or
-      (LowerCase(ExtractFileExt(Paths[i])) = '.m3u') or (LowerCase(ExtractFileExt(Paths[i])) = '.m3u8')) then
-    begin
-      ext := LowerCase(ExtractFileExt(Paths[i]));
-      if Pos('.m3u', ext) = 1 then
-        LoadPlaylistFile(Paths[i])
-      else if ext = '.cue' then
-        AddCueFile(Paths[i])
-      else
-        AddOne(Paths[i]);
     end;
+  finally
+    Done.Free;
+    Covered.Free;
   end;
   Result := FCount - oldCount;
   DebugLog(Format('add: %d new track(s), %d in the list', [Result, FCount]));
