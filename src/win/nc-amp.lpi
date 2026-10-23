@@ -37,7 +37,7 @@
         <IsPartOfProject Value="True"/>
       </Unit0>
       <Unit1>
-        <Filename Value="mainform.pas"/>
+        <Filename Value="../common/mainform.pas"/>
         <IsPartOfProject Value="True"/>
         <ComponentName Value="Form1"/>
         <HasResources Value="True"/>
@@ -45,17 +45,17 @@
         <UnitName Value="MainForm"/>
       </Unit1>
       <Unit2>
-        <Filename Value="ncaudio.pas"/>
+        <Filename Value="../common/ncaudio.pas"/>
         <IsPartOfProject Value="True"/>
         <UnitName Value="NcAudio"/>
       </Unit2>
       <Unit3>
-        <Filename Value="tagreader.pas"/>
+        <Filename Value="../common/tagreader.pas"/>
         <IsPartOfProject Value="True"/>
         <UnitName Value="TagReader"/>
       </Unit3>
       <Unit4>
-        <Filename Value="titlefont.pas"/>
+        <Filename Value="../common/titlefont.pas"/>
         <IsPartOfProject Value="True"/>
         <UnitName Value="TitleFont"/>
       </Unit4>
@@ -92,8 +92,10 @@
       <Filename Value="bin/nc-amp"/>
     </Target>
     <SearchPaths>
+      <OtherUnitFiles Value="../common"/>
+      <ObjectPath Value="../engine/win/obj"/>
       <IncludeFiles Value="$(ProjOutDir)"/>
-      <Libraries Value="engine/lib"/>
+      <Libraries Value="../engine/win/lib"/>
       <UnitOutputDirectory Value="lib/$(TargetCPU)-$(TargetOS)"/>
     </SearchPaths>
     <CodeGeneration>

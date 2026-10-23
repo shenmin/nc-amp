@@ -1,7 +1,7 @@
 # nc-amp for macOS (Apple Silicon)
 
 The player, playlist, shuffle/resume, settings, skin drawing and LCD rendering are the **same units** as the
-Windows build (`src/*.pas`, built with `{$IFDEF MSWINDOWS}` / `{$ELSE}` only where the platforms really differ).
+Windows build (`src/common/*.pas`, built with `{$IFDEF MSWINDOWS}` / `{$ELSE}` only where the platforms really differ).
 The units in this folder replace the Windows-only ones with the same unit names:
 
 | unit | Windows | macOS |
@@ -14,10 +14,11 @@ The units in this folder replace the Windows-only ones with the same unit names:
 | `NcMac` | - | backing scale, activation, bundled font, sleep/quit notifications |
 | `NcTest` | - | test driver, inert unless `NCAMP_TEST_DRIVER=1` |
 
-The audio engine (`src/engine/ncaudio.c`, miniaudio) is shared too; `ncplat.h` maps the few Win32 primitives it uses
-to pthreads, `__APPLE__` blocks add CoreAudio device following and an AudioToolbox decoder (AAC/ALAC/AIFF/CAF).
+The audio engine (`src/engine/ncaudio.c`, miniaudio) is shared too; `src/engine/mac/` holds the macOS parts: `ncplat.h` maps the
+few Win32 primitives it uses to pthreads, `plat.h` the path/string helpers, `backend_at.h` the AudioToolbox decoder
+(AAC/ALAC/AIFF/CAF); `__APPLE__` blocks in `ncaudio.c` add CoreAudio device following.
 
-Build (Xcode command line tools, CMake, Free Pascal 3.2.x for aarch64-darwin, Lazarus 4.x with the Cocoa LCL):
+Build (project `src/mac/nc-amp.lpi`; Xcode command line tools, CMake, Free Pascal 3.2.x for aarch64-darwin, Lazarus 4.x with the Cocoa LCL):
 
     LAZBUILD=/path/to/lazbuild LAZBUILD_ARGS="--compiler=... --lazarusdir=... --pcp=..." scripts/build-mac.sh
 

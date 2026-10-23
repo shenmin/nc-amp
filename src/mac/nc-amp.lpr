@@ -6,15 +6,10 @@ program ncamp;
 {$WARN SYMBOL_PLATFORM OFF}
 
 uses
-  {$IFDEF UNIX}cthreads,{$ENDIF}   // the single-instance listener runs on a thread
+  cthreads,   // the single-instance listener runs on a thread
   DpiInit,    // per-monitor DPI awareness before any window exists
   Interfaces, // this includes the LCL widgetset
   Forms, SingleInst, MainForm, NcAudio, TagReader;
-
-{$IFDEF MSWINDOWS}
-{$R *.res}
-{$R ncamp.res}  // manifest + audio engine + LCD font, built from ncamp.rc (see build.sh)
-{$ENDIF}
 
 begin
   { one instance per session: a second one forwards its files and quits here,

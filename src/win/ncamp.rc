@@ -5,4 +5,4 @@
 1         24     "nc-amp.manifest"
 //  - LCD text font: IBM Plex Mono Medium, unmodified (SIL OFL 1.1),
 //    loaded privately with AddFontMemResourceEx (not installed system-wide)
-LCDFONT   RCDATA "../assets/fonts/IBMPlexMono-Medium.ttf"
+LCDFONT   RCDATA "../../assets/fonts/IBMPlexMono-Medium.ttf"

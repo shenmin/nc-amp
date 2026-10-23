@@ -1,12 +1,11 @@
 # build output
 /build/
 /dist/
-/src/bin/
-/src/lib/
-/src/backup/
-/src/engine/*.dll
-/src/ncamp.res
-/src/nc-amp.res
+/src/*/bin/
+/src/*/lib/
+/src/*/backup/
+/src/win/ncamp.res
+/src/win/nc-amp.res
 *.o
 *.ppu
 *.a
@@ -18,9 +17,9 @@ __pycache__/
 *.pyc
 .DS_Store
 Thumbs.db
-/src/engine/obj/
-/src/engine/lib/
-/src/engine/objs.inc
+/src/engine/win/obj/
+/src/engine/win/lib/
+/src/engine/win/objs.inc
 /build-mac/
-/src/engine/lib-mac/
+/src/engine/mac/lib/
 /dist-mac/

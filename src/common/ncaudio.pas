@@ -1,26 +1,27 @@
 { SPDX-License-Identifier: GPL-3.0-or-later
   Copyright (C) 2026 Shen Min
 
-  Binding for the nc-amp audio engine (C, see engine/ncaudio.c). Since 2.0.0 the engine
+  Binding for the nc-amp audio engine (C, see ../engine/ncaudio.c). Since 2.0.0 the engine
   is linked statically into nc-amp.exe: scripts/build-engine.sh compiles it with MinGW-w64
-  (engine + opusfile; miniaudio and stb_vorbis are included by ncaudio.c) and puts these
-  objects plus exactly the members of the static libraries they need (libopus, libogg, the
-  static part of MinGW's msvcrt library, mingwex, libgcc) into engine/obj, listed in
-  engine/objs.inc. The only imports left are kernel32 / ole32 / msvcrt, from the MinGW
-  import libraries in engine/lib. No MinGW start-up code runs (see engine/nccrt.c); no DLL
-  is written or loaded. }
+  (engine + opusfile + libdemac; miniaudio and stb_vorbis are included by ncaudio.c) and
+  puts these objects plus exactly the members of the static libraries they need (libopus,
+  libogg, the static part of MinGW's msvcrt library, mingwex, libgcc) into engine/win/obj,
+  listed in engine/win/objs.inc (the project's object path points there). The only imports
+  left are kernel32 / ole32 / msvcrt, from the MinGW import libraries in engine/win/lib.
+  No MinGW start-up code runs (see engine/win/nccrt.c); no DLL is written or loaded.
+  On macOS the same engine is one static library, engine/mac/lib/libncengine.a. }
 unit NcAudio;
 {$mode objfpc}{$H+}
 
 {$IFDEF MSWINDOWS}
 { the engine objects (generated list), then the import libraries for what they use from
   kernel32.dll / ole32.dll / msvcrt.dll }
-{$I engine/objs.inc}
+{$I ../engine/win/objs.inc}
 {$LINKLIB libmsvcrt.a}
 {$LINKLIB libole32.a}
 {$LINKLIB libkernel32.a}
 {$ELSE}
-{ macOS: one static library built by scripts/build-engine-mac.sh (src/engine/lib-mac,
+{ macOS: one static library built by scripts/build-engine-mac.sh (src/engine/mac/lib,
   passed to the linker with -Fl), plus the system frameworks the engine uses }
 {$LINKLIB ncengine}
 {$LINKFRAMEWORK CoreAudio}

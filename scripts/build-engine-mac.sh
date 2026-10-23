@@ -3,7 +3,7 @@
 # Copyright (C) 2026 Shen Min
 #
 # Build the audio engine for macOS (arm64 by default) as ONE static library,
-# src/engine/lib-mac/libncengine.a, that Free Pascal links into the nc-amp executable:
+# src/engine/mac/lib/libncengine.a, that Free Pascal links into the nc-amp executable:
 # ncaudio.c (miniaudio + stb_vorbis + the AudioToolbox AAC backend), opusfile, libopus, libogg.
 # Needs Xcode command line tools and CMake. Nothing but system frameworks is linked dynamically.
 set -e
@@ -40,7 +40,7 @@ for n in ogg opus; do
 done
 
 O="$DEPS/opusfile-0.12"
-E="$ROOT/src/engine"; OBJ="$B/obj"; LIB="$E/lib-mac"
+E="$ROOT/src/engine"; OBJ="$B/obj"; LIB="$E/mac/lib"
 rm -rf "$OBJ"; mkdir -p "$OBJ" "$LIB"
 for f in "$E/ncaudio.c" "$O/src/opusfile.c" "$O/src/info.c" "$O/src/internal.c" "$O/src/stream.c"; do
   "$CC" $CFLAGS -c "$f" -o "$OBJ/$(basename "$f" .c).o" \
