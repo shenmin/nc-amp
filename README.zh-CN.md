@@ -34,15 +34,11 @@ nc-amp —— 基于 Free Pascal/Lazarus 的原生开源音乐播放器，支持
 | 系统 | 文件 | 要求 |
 |---|---|---|
 | Windows | `nc-amp-2.1.0-win64.zip`（内含 `nc-amp.exe`） | Windows 10 / 11，64 位 |
-| macOS | `nc-amp-2.1.0-macos-arm64.zip`（内含 `nc-amp.app`） | macOS 11 及以上，Apple 芯片（M1 及更新） |
+| macOS | `nc-amp-2.1.0-macos-arm64.dmg`（内含 `nc-amp.app`） | macOS 11 及以上，Apple 芯片（M1 及更新） |
 
 **Windows**：解压后直接运行 `nc-amp.exe`。程序未做代码签名，首次运行时 SmartScreen 可能提示“Windows 已保护你的电脑”：点击“更多信息”→“仍要运行”。
 
-**macOS**：解压后把 `nc-amp.app` 放到任意位置（例如“应用程序”文件夹）。应用采用临时（ad-hoc）签名，没有经过公证，首次启动时 Gatekeeper 可能拒绝打开（“无法打开，因为无法验证开发者”）：右键点击应用选择“打开”（再点一次“打开”），或在终端中执行一次下面的命令去掉隔离标记：
-
-```sh
-xattr -dr com.apple.quarantine /Applications/nc-amp.app
-```
+**macOS**：打开 dmg，把 `nc-amp.app` 拖到“应用程序”。应用使用 Developer ID（Sunisoft Limited）签名并通过了 Apple 公证，可以直接打开。自己编译的版本是临时（ad-hoc）签名，如果 Gatekeeper 拒绝打开，请右键选择“打开”，或在终端执行一次 `xattr -dr com.apple.quarantine nc-amp.app`。
 
 macOS 上 nc-amp 没有 Dock 图标，也没有自己的菜单栏：请使用菜单栏中的状态图标（左键显示 / 隐藏窗口，右键打开播放菜单），或在播放器上右键。
 

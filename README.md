@@ -34,15 +34,11 @@ Get the zip for your system from [Releases](https://github.com/shenmin/nc-amp/re
 | System | File | Needs |
 |---|---|---|
 | Windows | `nc-amp-2.1.0-win64.zip` (contains `nc-amp.exe`) | Windows 10 / 11, 64-bit |
-| macOS | `nc-amp-2.1.0-macos-arm64.zip` (contains `nc-amp.app`) | macOS 11 or later on Apple Silicon (M1 and newer) |
+| macOS | `nc-amp-2.1.0-macos-arm64.dmg` (contains `nc-amp.app`) | macOS 11 or later on Apple Silicon (M1 and newer) |
 
 **Windows:** unzip and run `nc-amp.exe`. It is not code-signed, so SmartScreen may say "Windows protected your PC" the first time: click *More info* → *Run anyway*.
 
-**macOS:** unzip and move `nc-amp.app` anywhere (for example to Applications). The app is signed ad hoc, not notarised, so Gatekeeper may refuse the first launch ("cannot be opened because the developer cannot be verified"): right-click the app and choose *Open* (then *Open* again), or remove the quarantine flag once in Terminal:
-
-```sh
-xattr -dr com.apple.quarantine /Applications/nc-amp.app
-```
+**macOS:** open the dmg and drag `nc-amp.app` to Applications. The app is signed with a Developer ID (Sunisoft Limited) and notarised by Apple, so it opens normally. Builds you make yourself are signed ad hoc: if Gatekeeper refuses one, right-click it and choose *Open*, or run `xattr -dr com.apple.quarantine nc-amp.app` once.
 
 nc-amp has no Dock icon and no menu bar of its own on macOS: use its menu bar status item (left click shows / hides the windows, right click opens the playback menu) or the right-click menu on the player.
 
