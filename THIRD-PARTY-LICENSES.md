@@ -3,31 +3,40 @@
 nc-amp is licensed under the **GNU General Public License v3.0 or later** (see [LICENSE](LICENSE)).
 It contains or links the components below. Every one of them is under a licence that is
 compatible with GPL-3.0-or-later (public domain / MIT-0 / MIT / BSD-3-Clause / ZPL-2.1 /
-Lucent permissive notice / OFL-1.1 / LGPL with static-linking exception / GCC Runtime Library
-Exception). No proprietary code,
-library or codec is included in the source tree or in `nc-amp.exe`.
+Lucent permissive notice / OFL-1.1 / GPL-2.0-or-later / LGPL with static-linking exception /
+GCC Runtime Library Exception). No proprietary code, library or codec is included in the source
+tree, in `nc-amp.exe` (Windows) or in `nc-amp.app` (macOS).
 
 | Component | Used for | Licence | GPL-3.0 compatible |
 |---|---|---|---|
 | [miniaudio](https://miniaud.io) 0.11.25 (incl. dr_mp3, dr_flac, dr_wav) | audio output, MP3 / FLAC / WAV decoding, resampling | Public domain (Unlicense) or MIT-0 | yes |
 | miniaudio libopus backend (`miniaudio_libopus.c/h`) | glue between miniaudio and opusfile | same as miniaudio | yes |
 | [stb_vorbis](https://github.com/nothings/stb) 1.22 | Ogg Vorbis decoding | MIT or public domain (Unlicense) | yes |
+| libdemac (from [Rockbox](https://github.com/Rockbox/rockbox), `third_party/libdemac`) | Monkey's Audio (APE) decoding | GPL-2.0-or-later | yes ("or later": used under GPL-3.0-or-later) |
 | [libogg](https://xiph.org/ogg/) 1.3.5 | Ogg container (for Opus) | BSD-3-Clause | yes |
 | [libopus](https://opus-codec.org) 1.5.2 | Opus decoding | BSD-3-Clause | yes |
 | [opusfile](https://opus-codec.org) 0.12 | Opus file reading / seeking | BSD-3-Clause | yes |
-| Windows Media Foundation | M4A / AAC decoding | part of Windows, used through its public API; **nothing is bundled** | n/a (system library) |
+| Windows Media Foundation | M4A / AAC decoding (Windows) | part of Windows, used through its public API; **nothing is bundled** | n/a (system library) |
+| AudioToolbox / Core Audio (macOS) | M4A / AAC / ALAC / AIFF / CAF decoding and audio output (macOS) | part of macOS, used through its public API; **nothing is bundled** | n/a (system library) |
 | [IBM Plex Mono](https://github.com/IBM/plex) Medium | LCD / playlist text (embedded font) | SIL Open Font License 1.1 | yes (font, separate work) |
 | [Audiowide](https://fonts.google.com/specimen/Audiowide) | "nc-amp" title lettering (glyph outlines converted to vectors at build time) | SIL Open Font License 1.1 | yes |
 | [Free Pascal](https://www.freepascal.org) RTL / FCL | runtime library | LGPL-2.1 with static-linking exception | yes |
-| [Lazarus](https://www.lazarus-ide.org) LCL / LazUtils | GUI framework | LGPL-2.1 with static-linking exception (modified LGPL) | yes |
-| MinGW-w64 runtime (parts of libmingwex and the static helpers of libmsvcrt), libgcc (`__chkstk_ms`) | C runtime helpers for the audio engine (number formatting, maths), statically linked into `nc-amp.exe` | ZPL-2.1 / public domain; gdtoa and `mingw_pformat`: Lucent (permissive); libgcc: GPL-3.0 with GCC Runtime Library Exception | yes |
+| [Lazarus](https://www.lazarus-ide.org) LCL / LazUtils (Win32 and Cocoa widgetsets) | GUI framework | LGPL-2.1 with static-linking exception (modified LGPL) | yes |
+| MinGW-w64 runtime (parts of libmingwex and the static helpers of libmsvcrt), libgcc (`__chkstk_ms`) | C runtime helpers for the audio engine (number formatting, maths), statically linked into `nc-amp.exe` (Windows only) | ZPL-2.1 / public domain; gdtoa and `mingw_pformat`: Lucent (permissive); libgcc: GPL-3.0 with GCC Runtime Library Exception | yes |
 
 Notes
 
 - The audio engine (source: `src/engine/`, GPL-3.0-or-later) is built from the components above
-  and statically linked into `nc-amp.exe`; nothing is unpacked or written to disk at run time.
-- AAC decoding uses the decoder that ships with Windows (Media Foundation). On Windows "N"
-  editions without the Media Feature Pack, M4A/AAC files are skipped; all other formats work.
+  and statically linked into `nc-amp.exe` (Windows) and into the `nc-amp` executable inside
+  `nc-amp.app` (macOS); nothing is unpacked or written to disk at run time.
+- APE (Monkey's Audio) files are decoded by libdemac, which is licensed under the GPL version 2
+  or (at your option) any later version; nc-amp uses it under version 3 or later. Its source is
+  in `third_party/libdemac/` (with the licence text in `COPYING` and a list of the two small
+  build switches added in `README.nc-amp.md`).
+- The macOS build bundles IBM Plex Mono Medium (SIL OFL 1.1) in `nc-amp.app/Contents/Resources`.
+- AAC decoding uses the decoder that ships with the operating system (Media Foundation on Windows,
+  AudioToolbox on macOS). On Windows "N" editions without the Media Feature Pack, M4A/AAC files are
+  skipped; all other formats work.
 - The Free Pascal and Lazarus libraries are licensed under the LGPL with an exception that
   permits static linking into programs under any licence; see
   <https://wiki.freepascal.org/licensing> and the `COPYING.modifiedLGPL.txt` file in the Lazarus sources.
@@ -128,6 +137,34 @@ ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION
 WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 ------------------------------------------------------------------------------
 ```
+
+## libdemac (Monkey's Audio decoder, from Rockbox)
+
+```text
+libdemac - A Monkey's Audio decoder
+
+Copyright (C) Dave Chapman 2007
+
+This program is free software; you can redistribute it and/or modify
+it under the terms of the GNU General Public License as published by
+the Free Software Foundation; either version 2 of the License, or
+(at your option) any later version.
+
+This program is distributed in the hope that it will be useful,
+but WITHOUT ANY WARRANTY; without even the implied warranty of
+MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+GNU General Public License for more details.
+
+You should have received a copy of the GNU General Public License
+along with this program; if not, write to the Free Software
+Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110, USA
+```
+
+This is the notice at the top of every libdemac source file. The full text of the GNU General
+Public License version 2 is in [third_party/libdemac/COPYING](third_party/libdemac/COPYING); nc-amp
+as a whole is under the GNU General Public License version 3 or later ([LICENSE](LICENSE)).
+
+---
 
 ## libogg
 
