@@ -1,15 +1,16 @@
 # Third-party sources
 
-Vendored here (single-file libraries, unmodified, licence text in each file):
+Vendored here (licence text in each file or directory):
 
 | Path | Component | Version | Licence |
 |---|---|---|---|
 | `miniaudio/miniaudio.h` | [miniaudio](https://miniaud.io) - device I/O, MP3/FLAC/WAV decoding (dr_mp3, dr_flac, dr_wav built in) | 0.11.25 | Public domain (Unlicense) or MIT-0 |
 | `miniaudio/miniaudio_libopus.{c,h}` | miniaudio libopus decoding backend (from miniaudio `extras/decoders/libopus`) | 0.11.25 | same as miniaudio |
 | `stb_vorbis/stb_vorbis.c` | [stb_vorbis](https://github.com/nothings/stb) - Ogg Vorbis decoder | 1.22 | Public domain (Unlicense) or MIT |
+| `libdemac/` | libdemac from [Rockbox](https://github.com/Rockbox/rockbox) - Monkey's Audio (APE) decoder; two small build switches added, see `libdemac/README.nc-amp.md` | Rockbox `9377ad1` | GPL-2.0-or-later (`libdemac/COPYING`) |
 
 Fetched at build time by `scripts/fetch-deps.sh` into `build/deps/` (pinned versions and
-SHA-256 checksums in `deps.txt`), built as static libraries and linked into `nc-amp.exe`:
+SHA-256 checksums in `deps.txt`), built as static libraries and linked into `nc-amp.exe` / the macOS executable:
 
 | Component | Version | Licence |
 |---|---|---|

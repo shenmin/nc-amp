@@ -57,9 +57,17 @@ O="$DEPS/opusfile-0.12"
 E="$ROOT/src/engine"; W="$E/win"; OBJ="$W/obj"; LIB="$W/lib"
 rm -rf "$OBJ" "$LIB"; mkdir -p "$OBJ" "$LIB"
 for f in "$E/ncaudio.c" "$W/nccrt.c" "$W/ncguids.c" "$O/src/opusfile.c" "$O/src/info.c" "$O/src/internal.c" "$O/src/stream.c"; do
-  "$CC" -O2 $ENGINE_CFLAGS -c "$f" -o "$OBJ/$(basename "$f" .c).o" \
+  n=$(basename "$f" .c); [ "$n" != ncaudio ] || n=ncengine      # (not ncaudio.o: that is the Pascal unit NcAudio's own object)
+  "$CC" -O2 $ENGINE_CFLAGS -c "$f" -o "$OBJ/$n.o" \
     -I"$ROOT/third_party/miniaudio" -I"$ROOT/third_party/stb_vorbis" -I"$E" \
     -I"$O/include" -I"$P/include" -I"$P/include/opus"
+done
+# Monkey's Audio (APE): ncape.c + libdemac (third_party/libdemac; filter.c is #included by the filter_*.c files).
+# NCAMP_DEMAC_PORTABLE: plain C vector math; NCAMP_DEMAC_BUFFER_ONLY: no file-descriptor header parser
+D="$ROOT/third_party/libdemac"
+for f in "$E/ncape.c" "$D"/decoder.c "$D"/entropy.c "$D"/filter_*.c "$D"/parser.c "$D"/predictor.c; do
+  n=$(basename "$f" .c); [ "$f" = "$E/ncape.c" ] || n="demac-$n"
+  "$CC" -O2 $ENGINE_CFLAGS -DNCAMP_DEMAC_PORTABLE -DNCAMP_DEMAC_BUFFER_ONLY -c "$f" -o "$OBJ/$n.o" -I"$D" -I"$E"
 done
 # The static libraries the engine needs: libopus, libogg, MinGW's mingwex and libgcc, and the static part of MinGW's libmsvcrt.a (which mixes
 # msvcrt.dll imports with static code such as its own sin / cos / pow).

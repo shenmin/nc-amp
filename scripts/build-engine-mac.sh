@@ -4,7 +4,7 @@
 #
 # Build the audio engine for macOS (arm64 by default) as ONE static library,
 # src/engine/mac/lib/libncengine.a, that Free Pascal links into the nc-amp executable:
-# ncaudio.c (miniaudio + stb_vorbis + the AudioToolbox AAC backend), opusfile, libopus, libogg.
+# ncaudio.c (miniaudio + stb_vorbis + the AudioToolbox AAC backend), ncape.c + libdemac (APE), opusfile, libopus, libogg.
 # Needs Xcode command line tools and CMake. Nothing but system frameworks is linked dynamically.
 set -e
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
@@ -46,6 +46,12 @@ for f in "$E/ncaudio.c" "$O/src/opusfile.c" "$O/src/info.c" "$O/src/internal.c" 
   "$CC" $CFLAGS -c "$f" -o "$OBJ/$(basename "$f" .c).o" \
     -I"$ROOT/third_party/miniaudio" -I"$ROOT/third_party/stb_vorbis" -I"$E" \
     -I"$O/include" -I"$P/include" -I"$P/include/opus"
+done
+# Monkey's Audio (APE): ncape.c + libdemac (third_party/libdemac; filter.c is #included by the filter_*.c files)
+D="$ROOT/third_party/libdemac"
+for f in "$E/ncape.c" "$D"/decoder.c "$D"/entropy.c "$D"/filter_*.c "$D"/parser.c "$D"/predictor.c; do
+  n=$(basename "$f" .c); [ "$f" = "$E/ncape.c" ] || n="demac-$n"
+  "$CC" $CFLAGS -DNCAMP_DEMAC_PORTABLE -DNCAMP_DEMAC_BUFFER_ONLY -c "$f" -o "$OBJ/$n.o" -I"$D" -I"$E"
 done
 rm -f "$LIB/libncengine.a"
 libtool -static -o "$LIB/libncengine.a" "$OBJ"/*.o "$P/lib/libopus.a" "$P/lib/libogg.a"

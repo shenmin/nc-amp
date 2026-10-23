@@ -32,7 +32,7 @@ const
   NBARS = 19;
   WM_NCAMP_APPLYDPI = WM_USER + 77;
   WM_NCAMP_IPC = WM_USER + 78;      { request forwarded by a second instance }
-  AUDIO_MASK = '*.mp3;*.mp2;*.mp1;*.ogg;*.oga;*.opus;*.flac;*.fla;*.wav;*.aif;*.aiff;*.m4a;*.m4b;*.aac;*.mp4;*.wma';
+  AUDIO_MASK = '*.mp3;*.mp2;*.mp1;*.ogg;*.oga;*.opus;*.flac;*.fla;*.ape;*.wav;*.aif;*.aiff;*.m4a;*.m4b;*.aac;*.mp4;*.wma';
 
 type
   TBtnId = (bNone,

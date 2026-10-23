@@ -23,6 +23,7 @@
       <key>CFBundleTypeName</key><string>Audio</string>
       <key>CFBundleTypeRole</key><string>Viewer</string>
       <key>LSHandlerRank</key><string>Alternate</string>
+      <key>CFBundleTypeExtensions</key><array><string>ape</string></array>
       <key>LSItemContentTypes</key>
       <array>
         <string>public.audio</string>

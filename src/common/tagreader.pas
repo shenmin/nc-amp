@@ -2,7 +2,8 @@
   Copyright (C) 2026 Shen Min }
 unit TagReader;
 { Reads Title/Artist straight from the file: ID3v2 (2.2/2.3/2.4) and ID3v1 (MP3 and
-  others), Vorbis comments (FLAC, Ogg Vorbis, Opus) and MP4/M4A 'ilst' atoms.
+  others), Vorbis comments (FLAC, Ogg Vorbis, Opus), MP4/M4A 'ilst' atoms and APEv2 tags
+  (Monkey's Audio, also found on MP3 files).
   Legacy 8-bit tags (very common in Chinese MP3s, GBK) are decoded with the system
   ANSI code page. Durations come from the audio engine (nca_probe). }
 {$mode objfpc}{$H+}
@@ -366,6 +367,58 @@ begin
   if FindAtom(i0, i1, #$A9'ART', a0, a1) then Result := Result + 'ARTIST=' + ItemText(a0, a1) + #0;
 end;
 
+{ APEv2 tag (Monkey's Audio; also appended to MP3 and others): the footer sits at the end of the
+  file, before an optional ID3v1 tag. Text items -> #0-separated KEY=VALUE list }
+function ApeTags(f: TStream): AnsiString;
+var
+  foot, items: TBytes;
+  fpos, tagSize, p, itemsStart: Int64;
+  cnt, k, vlen, flags: Cardinal;
+  key: AnsiString;
+  i, j: Integer;
+  v: AnsiString;
+begin
+  Result := '';
+  fpos := f.Size - 32;
+  foot := nil;
+  for j := 0 to 1 do                                   { footer at the very end, or before ID3v1 }
+  begin
+    if fpos < 0 then Exit;
+    foot := ReadBytes(f, fpos, 32);
+    if (Length(foot) = 32) and (CompareByte(foot[0], 'APETAGEX'[1], 8) = 0) then Break;
+    foot := nil;
+    fpos := f.Size - 128 - 32;
+  end;
+  if Length(foot) <> 32 then Exit;
+  tagSize := LE32(foot, 12);                           { items + footer }
+  cnt := LE32(foot, 16);
+  if (tagSize < 32) or (tagSize > 4 * 1024 * 1024) or (tagSize - 32 > fpos + 32) then Exit;
+  itemsStart := fpos + 32 - tagSize;
+  items := ReadBytes(f, itemsStart, Integer(tagSize - 32));
+  if Length(items) <> Integer(tagSize - 32) then Exit;
+  p := 0;
+  k := 0;
+  while (k < cnt) and (p + 9 <= Length(items)) do
+  begin
+    vlen := LE32(items, Integer(p));
+    flags := LE32(items, Integer(p) + 4);
+    i := Integer(p) + 8;
+    key := '';
+    while (i < Length(items)) and (items[i] <> 0) do begin key := key + Chr(items[i]); Inc(i); end;
+    Inc(i);                                            { the key's #0 }
+    if (i > Length(items)) or (Int64(i) + vlen > Length(items)) then Break;
+    if (flags and 6) = 0 then                          { text item (not binary / locator) }
+    begin
+      SetString(v, PAnsiChar(@items[i]), vlen);
+      j := Pos(#0, v);                                 { several values: keep the first }
+      if j > 0 then v := Copy(v, 1, j - 1);
+      Result := Result + key + '=' + v + #0;
+    end;
+    p := Int64(i) + vlen;
+    Inc(k);
+  end;
+end;
+
 function ReadTitle(const FileNameUTF8: string): string;
 var
   f: THandleStream;
@@ -395,6 +448,7 @@ begin
       if (ext = '.flac') then kv := FlacTags(f, id3len)
       else if (ext = '.ogg') or (ext = '.oga') or (ext = '.opus') then kv := OggTags(f)
       else if (ext = '.m4a') or (ext = '.mp4') or (ext = '.m4b') or (ext = '.aac') then kv := Mp4Tags(f);
+      if kv = '' then kv := ApeTags(f);          { .ape, and APEv2 tags on MP3 and others }
       if kv <> '' then
       begin
         kv := kv + #0;

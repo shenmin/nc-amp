@@ -3,7 +3,7 @@
  *
  * ncaudio - the nc-amp audio engine (linked into the nc-amp executable), built only from open-source parts:
  *   miniaudio (playback device; MP3/FLAC/WAV decoding via its bundled dr_libs code),
- *   stb_vorbis (Ogg Vorbis), libopus + opusfile + libogg (Opus),
+ *   stb_vorbis (Ogg Vorbis), libopus + opusfile + libogg (Opus), libdemac (Monkey's Audio / APE),
  *   Windows Media Foundation / macOS AudioToolbox (M4A / AAC, decoded by the OS - no codec is bundled).
  * Plain C API used from Free Pascal (ncaudio.pas). Paths are UTF-16 (wchar_t) on Windows and
  * UTF-8 (char) on macOS (nca_char).
@@ -36,6 +36,7 @@
 
 #undef STB_VORBIS_HEADER_ONLY
 #include "stb_vorbis.c"
+#include "ncape.h"
 
 #define NCA_API             /* linked statically into nc-amp.exe (2.0.0+), no exports */
 
@@ -140,6 +141,84 @@ static ma_decoding_backend_vtable g_nca_vb_backend = { NULL, nca_vb_init_file_w,
 #endif
 
 /* ------------------------------------------------------------------ */
+/* Monkey's Audio (.ape) backend: ncape (libdemac) on a fopen()ed file  */
+/* (exact length from the header, frame-accurate seeking)              */
+/* ------------------------------------------------------------------ */
+typedef struct {
+    ma_data_source_base ds;
+    ncape *a;
+    ma_uint32 channels, rate;
+    ma_uint64 length;
+} nca_ape;
+
+static ma_result nca_ape_read(ma_data_source *pDS, void *out, ma_uint64 frameCount, ma_uint64 *pRead)
+{
+    nca_ape *m = (nca_ape*)pDS; ma_uint64 done = 0; float tmp[2048 * 2];
+    while (done < frameCount) {
+        ma_uint64 want = frameCount - done, got;
+        if (!out && want > 2048) want = 2048;
+        got = ncape_read_f32(m->a, out ? (float*)out + done * m->channels : tmp, want);
+        if (got == 0) break;
+        done += got;
+    }
+    if (pRead) *pRead = done;
+    return (done == 0 && frameCount > 0) ? MA_AT_END : MA_SUCCESS;
+}
+static ma_result nca_ape_seek(ma_data_source *pDS, ma_uint64 frame)
+{
+    return ncape_seek(((nca_ape*)pDS)->a, frame) == 0 ? MA_SUCCESS : MA_ERROR;
+}
+static ma_result nca_ape_format(ma_data_source *pDS, ma_format *f, ma_uint32 *ch, ma_uint32 *sr, ma_channel *map, size_t cap)
+{
+    nca_ape *m = (nca_ape*)pDS;
+    if (f) *f = ma_format_f32;
+    if (ch) *ch = m->channels;
+    if (sr) *sr = m->rate;
+    if (map) ma_channel_map_init_standard(ma_standard_channel_map_microsoft, map, cap, m->channels);
+    return MA_SUCCESS;
+}
+static ma_result nca_ape_cursor(ma_data_source *pDS, ma_uint64 *c) { *c = ncape_cursor(((nca_ape*)pDS)->a); return MA_SUCCESS; }
+static ma_result nca_ape_length(ma_data_source *pDS, ma_uint64 *l) { *l = ((nca_ape*)pDS)->length; return MA_SUCCESS; }
+static ma_data_source_vtable g_nca_ape_ds_vtable = { nca_ape_read, nca_ape_seek, nca_ape_format, nca_ape_cursor, nca_ape_length, NULL, 0 };
+
+static const nca_char *const g_apeExts[] = { NCA_T(".ape"), NULL };
+
+static ma_result nca_ape_init_file_w(void *ud, const nca_char *path, const ma_decoding_backend_config *cfg,
+                                     const ma_allocation_callbacks *alloc, ma_data_source **ppDS)
+{
+    nca_ape *m; FILE *f; const ncape_info *in;
+    (void)ud; (void)cfg; (void)alloc;
+    if (!nca_ext_is(path, g_apeExts)) return MA_INVALID_FILE;
+    f = nca_fopen_rb(path);
+    if (!f) return MA_INVALID_FILE;
+    m = (nca_ape*)calloc(1, sizeof(*m));
+    if (!m) { fclose(f); return MA_OUT_OF_MEMORY; }
+    m->a = ncape_open(f);                                 /* closes f on failure */
+    if (!m->a) { free(m); return MA_INVALID_FILE; }
+    in = ncape_get_info(m->a);
+    m->channels = in->channels; m->rate = in->rate; m->length = in->length;
+    {
+        ma_data_source_config dc = ma_data_source_config_init();
+        dc.vtable = &g_nca_ape_ds_vtable;
+        if (ma_data_source_init(&dc, &m->ds) != MA_SUCCESS) { ncape_close(m->a); free(m); return MA_ERROR; }
+    }
+    *ppDS = (ma_data_source*)m;
+    return MA_SUCCESS;
+}
+static void nca_ape_uninit(void *ud, ma_data_source *pDS, const ma_allocation_callbacks *alloc)
+{
+    nca_ape *m = (nca_ape*)pDS; (void)ud; (void)alloc;
+    ma_data_source_uninit(&m->ds);
+    ncape_close(m->a);
+    free(m);
+}
+#ifdef _WIN32
+static ma_decoding_backend_vtable g_nca_ape_backend = { NULL, NULL, nca_ape_init_file_w, NULL, nca_ape_uninit };
+#else
+static ma_decoding_backend_vtable g_nca_ape_backend = { NULL, nca_ape_init_file_w, NULL, NULL, nca_ape_uninit };
+#endif
+
+/* ------------------------------------------------------------------ */
 /* player                                                              */
 /* ------------------------------------------------------------------ */
 typedef struct {
@@ -176,7 +255,7 @@ static volatile double g_endPos = 0;
 static volatile float g_vol = 1.0f, g_pan = 0.0f;
 static float g_ring[RING]; static volatile LONG g_ringPos = 0;
 static char g_err[256] = "";
-static ma_decoding_backend_vtable *g_backends[3];
+static ma_decoding_backend_vtable *g_backends[4];
 static volatile float g_peakOut = 0; static volatile LONG g_cbCount = 0, g_cbFrames = 0, g_cbTotal = 0;
 static volatile int g_reopening = 0, g_devInited = 0;
 static volatile int g_needRestart = 0, g_needDescribe = 0, g_shuttingDown = 0;
@@ -337,9 +416,9 @@ static void nca_describe(void)
 }
 
 #ifdef _WIN32
-NCA_API const char *nca_version(void) { return "miniaudio " MA_VERSION_STRING ", stb_vorbis 1.22, opusfile 0.12 / libopus 1.5.2, Media Foundation (AAC)"; }
+NCA_API const char *nca_version(void) { return "miniaudio " MA_VERSION_STRING ", stb_vorbis 1.22, opusfile 0.12 / libopus 1.5.2, libdemac (APE), Media Foundation (AAC)"; }
 #else
-NCA_API const char *nca_version(void) { return "miniaudio " MA_VERSION_STRING ", stb_vorbis 1.22, opusfile 0.12 / libopus 1.5.2, AudioToolbox (AAC)"; }
+NCA_API const char *nca_version(void) { return "miniaudio " MA_VERSION_STRING ", stb_vorbis 1.22, opusfile 0.12 / libopus 1.5.2, libdemac (APE), AudioToolbox (AAC)"; }
 #endif
 NCA_API const char *nca_error(void) { return g_err; }
 
@@ -349,6 +428,7 @@ static void nca_setup(void)
     if (!g_lockOk) { InitializeCriticalSection(&g_cs); g_lockOk = 1; }
     g_backends[0] = &g_nca_vb_backend;
     g_backends[1] = ma_decoding_backend_libopus;
+    g_backends[3] = &g_nca_ape_backend;
 #ifdef _WIN32
     g_backends[2] = &g_nca_mf_backend;
 #else
@@ -456,7 +536,7 @@ static ma_decoder_config nca_cfg(int forPlayback)
     ma_decoder_config c = ma_decoder_config_init(forPlayback ? ma_format_f32 : ma_format_unknown,
                                                  forPlayback ? 2 : 0, forPlayback ? g_devRate : 0);
     c.ppCustomBackendVTables = g_backends;
-    c.customBackendCount = 3;
+    c.customBackendCount = 4;
     c.seekPointCount = forPlayback ? 4096 : 0;      /* fast, accurate MP3 seeking */
     c.resampling.algorithm = ma_resample_algorithm_linear;
     c.resampling.linear.lpfOrder = 8;
@@ -532,6 +612,10 @@ static int nca_calc_bitrate(const nca_char *path, double seconds)
             for (i = 0; i < nseg; i++) body += seg[i];
             p += 27 + nseg + body;
         }
+    } else if (dot && nca_stricmp(dot, NCA_T(".ape")) == 0) {
+        /* the compressed audio data (the header, seek table, WAV header and tags are not audio) */
+        ncape_info ai;
+        if (ncape_probe(f, &ai) == 0 && ai.audio_bytes > 0) { start = 0; end = (ma_int64)ai.audio_bytes; }
     } else if (dot && (nca_stricmp(dot, NCA_T(".m4a")) == 0 || nca_stricmp(dot, NCA_T(".mp4")) == 0 || nca_stricmp(dot, NCA_T(".m4b")) == 0)) {
         /* sum of top-level 'mdat' atoms */
         ma_int64 p = 0, mdat = 0;
