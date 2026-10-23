@@ -598,6 +598,13 @@ begin
     SetLcdFont(c, True, hLogical);
     NcGetTM(c, tm);
     lh := tm.tmAscent - tm.tmInternalLeading; b := lh;
+    {$IFNDEF MSWINDOWS}
+    { Cocoa reports no internal leading: take it from the line height and the em size, so the
+      digits are centred on their cap height as on Windows (not hanging off the bottom) }
+    if tm.tmInternalLeading = 0 then
+      lh := tm.tmAscent - Max(0, tm.tmHeight - Abs(c.Font.Height));
+    b := lh - 1;      { Cocoa's baseline sits a pixel lower than the metrics say }
+    {$ENDIF}
   end
   else
     LcdMetrics(c, hLogical, lh, b);
