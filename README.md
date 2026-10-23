@@ -15,7 +15,9 @@ nc-amp - a native Free Pascal/Lazarus music player for Windows (64-bit) and macO
 
 - **Windows (64-bit) and macOS (Apple Silicon)** from one code base: the same player, skin and shortcuts on both.
 - **Single portable program:** one exe on Windows x64, one self-contained app on macOS - no installer, no extra files.
-- **Formats:** MP3, FLAC, APE (Monkey's Audio), WAV, Ogg Vorbis, Opus, M4A / AAC (AAC via the system decoder: Windows Media Foundation, macOS AudioToolbox, which also plays ALAC, AIFF and CAF on macOS).
+- **Formats:** MP3, FLAC, APE (Monkey's Audio), WAV, Ogg Vorbis, Opus, M4A / AAC (AAC via the system decoder: Windows Media Foundation, macOS AudioToolbox, which also plays ALAC, AIFF and CAF on macOS); CUE sheets (`.cue`) for album images; playlists in M3U / M3U8.
+- **CUE sheets:** add a `.cue` file (Add files, drag and drop, folder scan, command line, Finder / Explorer open) and every track of the sheet becomes its own playlist row, titled `performer - title` from the sheet, with its own length, seek bar and auto-advance. Works with a CUE for FLAC, APE, WAV, MP3 and other files, several `FILE` entries per sheet, relative paths, and sheets in UTF-8 (with or without BOM), UTF-16 or GBK / GB18030 (Chinese sheets). A folder scan skips an audio file that a CUE in the folder splits into tracks.
+- **Save and load playlists:** *Save playlist...* / *Load playlist...* (right-click menu and the playlist's ADD menu) write and read standard `.m3u8` (UTF-8) files, CUE tracks included; paths below the playlist's folder are stored relative to it.
 - **Drop and play:** drop files or folders (scanned recursively) on either window; the list plays at once.
 - **Always shuffle + repeat:** every track plays once per round, then the list is reshuffled; a new round never starts with the track that just ended.
 - **Classic two-window layout:** gunmetal skin with a sage LCD, real-time FFT spectrum, seek, volume and balance, bitrate / sample rate / stereo readouts; separate playlist that docks, snaps and resizes.
@@ -50,7 +52,7 @@ nc-amp has no Dock icon and no menu bar of its own on macOS: use its menu bar st
 - Click the time to switch elapsed / remaining; click the spectrum to turn it on / off.
 - Double-click the title bar (or the triangle glyph) to shade / unshade a window.
 - Resize the docked playlist to about the main window's height and it locks to it exactly.
-- Right-click anywhere for size, playlist, visualisation, add files / folder, info and exit.
+- Right-click anywhere for size, playlist, visualisation, add files / folder, save / load playlist, info and exit. *Load playlist...* replaces the current list (it starts playing only if the list was empty); dropping a `.m3u` / `.m3u8` file adds its tracks instead.
 - Left-click the tray icon (Windows) or the menu bar icon (macOS) to show / hide; right-click it for playback controls.
 - Settings are stored in `%LOCALAPPDATA%\nc-amp\` on Windows and in `~/Library/Application Support/nc-amp/` on macOS (`nc-amp.ini`, `playlist.m3u8`).
 
@@ -109,7 +111,7 @@ LAZBUILD=/path/to/lazbuild LAZBUILD_ARGS="--lazarusdir=/path/to/lazarus" scripts
 ### Repository layout
 
 ```
-src/common/     Pascal units shared by both platforms (player window, audio binding, tags, fonts)
+src/common/     Pascal units shared by both platforms (player window, audio binding, tags, CUE and M3U parsers, fonts)
 src/win/        Windows units, Lazarus project (nc-amp.lpi), manifest, icon, resources
 src/mac/        macOS units, Lazarus project (nc-amp.lpi), Info.plist, test driver
 src/engine/     audio engine (C): miniaudio + stb_vorbis + opusfile + libdemac (APE); ncape.c is the APE reader
@@ -117,6 +119,7 @@ src/engine/win/ Windows parts: Media Foundation (AAC) backend, C runtime stubs, 
 src/engine/mac/ macOS parts: AudioToolbox (AAC / ALAC / AIFF / CAF) backend, platform headers
 third_party/    vendored libraries (miniaudio, stb_vorbis, libdemac) and the pinned dependency list
 tests/ape/      APE decoder tests (bit-exact against the Monkey's Audio decoder)
+tests/cue/      CUE support tests (parser + engine, with generated test material)
 assets/fonts/   IBM Plex Mono, Audiowide (OFL) and the title-glyph generator
 assets/icon/    app icon (.ico, .icns) and its generator scripts
 docs/           screenshots

@@ -62,6 +62,9 @@ function nca_state: Integer; cdecl; external name 'nca_state';
 function nca_get_pos: Double; cdecl; external name 'nca_get_pos';
 function nca_get_len: Double; cdecl; external name 'nca_get_len';
 function nca_seek(sec: Double): Integer; cdecl; external name 'nca_seek';
+{ 2.1.0: play only [start, stop) of the open file (stop <= 0: to its end); position, length and seek are
+  then relative to start (CUE tracks). Call right after nca_open. }
+function nca_set_range(startSec, stopSec: Double): Integer; cdecl; external name 'nca_set_range';
 procedure nca_set_volume(v: Single); cdecl; external name 'nca_set_volume';
 procedure nca_set_pan(p: Single); cdecl; external name 'nca_set_pan';
 function nca_get_fft(out512: PSingle): Integer; cdecl; external name 'nca_get_fft';

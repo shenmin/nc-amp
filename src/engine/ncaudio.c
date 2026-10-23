@@ -250,6 +250,13 @@ static volatile int g_state = NCA_STOPPED;
    cursor, our playback position, keeps counting: the time runs past the duration and the end is
    never reached (1.7.6 queried the length several times per repaint). */
 static ma_uint64 g_lenFrames = 0;
+/* CUE tracks (2.1.0): nca_set_range plays [start, end) of the open file as if it were the whole track.
+   g_startFrames is the first frame (output rate), g_lenFrames the END frame (the file's length, or the
+   range end if that is earlier), so the audio callback needs no change; positions / length / seeks the
+   UI sees are relative to g_startFrames. The range is kept in seconds as well, to be re-applied when
+   the decoder is rebuilt for another device rate. */
+static ma_uint64 g_startFrames = 0, g_fileFrames = 0;
+static double g_rangeS = 0, g_rangeE = 0;
 static volatile int g_endReason = 0;   /* 1 = decoder EOF, 2 = known length reached, 3 = seek to the end (logged by nca_poll) */
 static volatile double g_endPos = 0;
 static volatile float g_vol = 1.0f, g_pan = 0.0f;
@@ -682,6 +689,41 @@ static void nca_fill_info(ma_decoder *d, const nca_char *path, nca_info *info, m
     if (dot) { int i; for (i = 0; i < 15 && dot[i + 1]; i++) info->codec[i] = (char)toupper((unsigned char)dot[i + 1]); }
 }
 
+/* (lock held) apply the range to a decoder of `rate` Hz whose file is `fileLen` output frames long (0 = unknown) */
+static void nca_apply_range(ma_uint32 rate, ma_uint64 fileLen)
+{
+    ma_uint64 e;
+    g_startFrames = 0; g_lenFrames = fileLen;
+    if (!rate) return;
+    if (g_rangeS > 0) g_startFrames = (ma_uint64)(g_rangeS * rate + 0.5);
+    if (g_rangeE > 0) {
+        e = (ma_uint64)(g_rangeE * rate + 0.5);
+        if (!fileLen || e < fileLen) g_lenFrames = e;
+    }
+    if (fileLen && g_startFrames > fileLen) g_startFrames = fileLen;
+    if (g_lenFrames && g_startFrames > g_lenFrames) g_startFrames = g_lenFrames;
+}
+
+/* play only [startSec, endSec) of the open file (endSec <= 0: to its end); the position, length and
+   seeks are then relative to startSec. Must follow nca_open (which resets the range). 1 = ok */
+NCA_API int nca_set_range(double startSec, double endSec)
+{
+    int ok = 1;
+    if (!g_lockOk) return 0;
+    EnterCriticalSection(&g_cs);
+    if (!g_dec || !g_dec->outputSampleRate) ok = 0;
+    else {
+        ma_uint64 cur = 0, fileLen = g_fileFrames;   /* the file length measured at open */
+        g_rangeS = startSec > 0 ? startSec : 0; g_rangeE = endSec > 0 ? endSec : 0;
+        nca_apply_range(g_dec->outputSampleRate, fileLen);
+        ma_decoder_get_cursor_in_pcm_frames(g_dec, &cur);
+        if (cur != g_startFrames) ok = ma_decoder_seek_to_pcm_frame(g_dec, g_startFrames) == MA_SUCCESS;
+        if (g_state == NCA_ENDED) g_state = NCA_STOPPED;
+    }
+    LeaveCriticalSection(&g_cs);
+    return ok;
+}
+
 /* open a file for playback; replaces the current one. 1 = ok */
 NCA_API int nca_open(const nca_char *path, nca_info *info)
 {
@@ -697,7 +739,7 @@ NCA_API int nca_open(const nca_char *path, nca_info *info)
         ma_decoder_seek_to_pcm_frame(d, 0);   /* the length scan must leave the stream at the start */
         if (info) nca_fill_info(d, path, info, srcLen);
         EnterCriticalSection(&g_cs);
-        g_lenFrames = outLen; g_endReason = 0;
+        g_lenFrames = outLen; g_fileFrames = outLen; g_startFrames = 0; g_rangeS = g_rangeE = 0; g_endReason = 0;
     }
     old = g_dec; g_dec = d; g_state = NCA_STOPPED; g_decGen++;
     nca_copy_path(g_path, path);
@@ -711,7 +753,7 @@ NCA_API void nca_close(void)
 {
     ma_decoder *old;
     if (!g_lockOk) return;
-    EnterCriticalSection(&g_cs); old = g_dec; g_dec = NULL; g_state = NCA_STOPPED; g_lenFrames = 0; g_decGen++; LeaveCriticalSection(&g_cs);
+    EnterCriticalSection(&g_cs); old = g_dec; g_dec = NULL; g_state = NCA_STOPPED; g_lenFrames = 0; g_fileFrames = 0; g_startFrames = 0; g_rangeS = g_rangeE = 0; g_decGen++; LeaveCriticalSection(&g_cs);
     if (old) { ma_decoder_uninit(old); free(old); }
 }
 
@@ -721,7 +763,7 @@ NCA_API void nca_stop(void)
 {
     if (!g_lockOk) return;
     EnterCriticalSection(&g_cs);
-    if (g_dec) { g_state = NCA_STOPPED; ma_decoder_seek_to_pcm_frame(g_dec, 0); }
+    if (g_dec) { g_state = NCA_STOPPED; ma_decoder_seek_to_pcm_frame(g_dec, g_startFrames); }
     LeaveCriticalSection(&g_cs);
 }
 NCA_API int nca_state(void) { return g_state; }
@@ -733,6 +775,7 @@ NCA_API double nca_get_pos(void)
     EnterCriticalSection(&g_cs);
     if (g_dec && ma_decoder_get_cursor_in_pcm_frames(g_dec, &c) == MA_SUCCESS && g_dec->outputSampleRate) {
         if (g_lenFrames && c > g_lenFrames) c = g_lenFrames;   /* the position never exceeds the length */
+        c = c > g_startFrames ? c - g_startFrames : 0;           /* CUE track: relative to its start */
         r = (double)c / g_dec->outputSampleRate;
     }
     LeaveCriticalSection(&g_cs);
@@ -745,7 +788,7 @@ NCA_API double nca_get_len(void)
     double r = 0;
     if (!g_lockOk) return 0;
     EnterCriticalSection(&g_cs);
-    if (g_dec && g_lenFrames && g_dec->outputSampleRate) r = (double)g_lenFrames / g_dec->outputSampleRate;
+    if (g_dec && g_lenFrames && g_dec->outputSampleRate) r = (double)(g_lenFrames - g_startFrames) / g_dec->outputSampleRate;
     LeaveCriticalSection(&g_cs);
     return r;
 }
@@ -757,7 +800,7 @@ NCA_API int nca_seek(double sec)
     if (sec < 0) sec = 0;
     EnterCriticalSection(&g_cs);
     if (g_dec) {
-        ma_uint64 t = (ma_uint64)(sec * g_dec->outputSampleRate), was = 0;
+        ma_uint64 t = g_startFrames + (ma_uint64)(sec * g_dec->outputSampleRate), was = 0;
         if (g_lenFrames && t > g_lenFrames) t = g_lenFrames;
         ma_decoder_get_cursor_in_pcm_frames(g_dec, &was);
         ok = ma_decoder_seek_to_pcm_frame(g_dec, t) == MA_SUCCESS;
@@ -964,7 +1007,7 @@ static void nca_rebuild_decoder(void)
 {
     static nca_char path[NCA_MAXPATH];
     ma_decoder *d, *old; ma_decoder_config cfg; unsigned gen; ma_uint32 rate = g_devRate, sr = 0;
-    ma_uint64 c = 0, srcLen, outLen, t; double posSec = 0;
+    ma_uint64 c = 0, srcLen, outLen, t, fileLen = 0, newStart = 0; double posSec = 0;
     EnterCriticalSection(&g_cs);
     if (!g_dec || !g_path[0] || !rate || g_dec->outputSampleRate == rate) { LeaveCriticalSection(&g_cs); return; }
     gen = g_decGen; nca_strcpy(path, g_path);
@@ -976,6 +1019,13 @@ static void nca_rebuild_decoder(void)
     srcLen = nca_src_len(d, &sr); outLen = nca_out_len(d, srcLen, sr);
     ma_decoder_seek_to_pcm_frame(d, 0);
     EnterCriticalSection(&g_cs);
+    fileLen = outLen;
+    if (gen == g_decGen && g_dec && (g_rangeS > 0 || g_rangeE > 0)) {      /* CUE track: the range at the new rate */
+        ma_uint64 s0 = g_startFrames, l0 = g_lenFrames, f0 = g_fileFrames;
+        nca_apply_range(rate, fileLen);
+        newStart = g_startFrames; outLen = g_lenFrames;
+        g_startFrames = s0; g_lenFrames = l0; g_fileFrames = f0;           /* committed below */
+    } else newStart = 0;
     if (gen != g_decGen || !g_dec) { LeaveCriticalSection(&g_cs); ma_decoder_uninit(d); free(d); nca_log("decoder rebuild dropped: the track changed meanwhile"); return; }
     /* the position now (it moved on, or the listener seeked, while the new decoder was built) */
     if (ma_decoder_get_cursor_in_pcm_frames(g_dec, &c) == MA_SUCCESS && g_dec->outputSampleRate) posSec = (double)c / g_dec->outputSampleRate;
@@ -987,10 +1037,10 @@ static void nca_rebuild_decoder(void)
         if (outLen && t + rate >= outLen && g_state == NCA_PLAYING) { g_state = NCA_ENDED; g_endReason = 3; g_endPos = posSec; }
         nca_log("decoder rebuild: seek to %.2f s failed", posSec);
     }
-    old = g_dec; g_dec = d; g_lenFrames = outLen;        /* the play state stays as it is now */
+    old = g_dec; g_dec = d; g_lenFrames = outLen; g_fileFrames = fileLen; g_startFrames = newStart;   /* the play state stays as it is now */
     LeaveCriticalSection(&g_cs);
     ma_decoder_uninit(old); free(old);
-    nca_log("decoder rebuilt for %u Hz, resumed at %.2f s (length %.2f s)", rate, posSec, outLen ? (double)outLen / rate : 0.0);
+    nca_log("decoder rebuilt for %u Hz, resumed at %.2f s (length %.2f s)", rate, posSec, outLen ? (double)(outLen - newStart) / rate : 0.0);
 }
 
 /* (engine thread) open the device on the current default endpoint; 1 = ok */

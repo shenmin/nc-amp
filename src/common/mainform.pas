@@ -12,7 +12,7 @@ uses
   {$IFDEF MSWINDOWS}Windows, Messages,{$ELSE}LCLIntf, BaseUnix, NcMac,{$ENDIF}
   Classes, SysUtils, Math, Forms, Controls, Graphics,
   Dialogs, ExtCtrls, Menus, LCLType, LMessages, FileUtil, LazFileUtils, LazUTF8, IniFiles,
-  NcAudio, TagReader, TitleFont, NcTray, SingleInst, FolderPick, NcTip;
+  NcAudio, TagReader, CueSheet, M3UFile, TitleFont, NcTray, SingleInst, FolderPick, NcTip;
 
 const
   APPNAME = 'nc-amp';
@@ -32,7 +32,7 @@ const
   NBARS = 19;
   WM_NCAMP_APPLYDPI = WM_USER + 77;
   WM_NCAMP_IPC = WM_USER + 78;      { request forwarded by a second instance }
-  AUDIO_MASK = '*.mp3;*.mp2;*.mp1;*.ogg;*.oga;*.opus;*.flac;*.fla;*.ape;*.wav;*.aif;*.aiff;*.m4a;*.m4b;*.aac;*.mp4;*.wma';
+  AUDIO_MASK = '*.mp3;*.mp2;*.mp1;*.ogg;*.oga;*.opus;*.flac;*.fla;*.ape;*.wav;*.aif;*.aiff;*.m4a;*.m4b;*.aac;*.mp4;*.wma;*.cue';
 
 type
   TBtnId = (bNone,
@@ -50,6 +50,10 @@ type
     Duration: Double;
     Scanned, Bad, Selected: Boolean;
     Id: Integer;
+    { CUE track (a part of an audio file): the title is the shown "performer - title" }
+    IsCue: Boolean;
+    CueTitle, Performer: string;
+    Start, Stop: Double;     { seconds in Path; Stop 0 = to the end of the file }
   end;
 
   TPlayState = (psStopped, psPlaying, psPaused);
@@ -118,6 +122,7 @@ type
     FSavedSig: string;
     FPLHash: QWord;
     FPLHashOk: Boolean;
+    FPlsDir: string;     { last folder of the playlist save / load dialogs }
     { native tooltip with the song title over the collapsed (shade) main window }
     FShadeTip: TNcTip;
     FShadeTipKey: string;
@@ -176,6 +181,13 @@ type
     procedure SetSizeMul(M: Double);
     function AddPaths(const Paths: array of string): Integer;
     procedure AddOne(const fn: string);
+    procedure AddEntry(const e: TPlEntry);
+    function AddCueFile(const fn: string): Integer;
+    function TrackKey(i: Integer): string;
+    function EntryOf(i: Integer): TPlEntry;
+    procedure SavePlaylistDialog;
+    procedure LoadPlaylistDialog;
+    function LoadPlaylistFile(const fn: string): Integer;
     procedure BuildShuffle(First, AvoidFirst: Integer);
     procedure PlayIndex(i: Integer; StartAt: Double = 0; StartPaused: Boolean = False);
     procedure UserPlay(i: Integer);
@@ -1368,6 +1380,19 @@ begin
     if AtX = MaxInt then pt := Mouse.CursorPos else pt := Point(AtX, AtY);
     DebugLog(Format('popup: tray=%s at %d,%d', [BoolToStr(FromTray, True), pt.X, pt.Y]));
     pick.Id := 0;
+    { test driver (NCAMP_TEST_DRIVER=1): /tmp/nc-test-pick names the item to choose, without showing the menu }
+    if (GetEnvironmentVariable('NCAMP_TEST_DRIVER') = '1') and FileExists('/tmp/nc-test-pick') then
+    begin
+      with TStringList.Create do
+      try
+        LoadFromFile('/tmp/nc-test-pick');
+        DeleteFile('/tmp/nc-test-pick');
+        for i := 0 to High(Items) do
+          if (Count > 0) and (Items[i].Cap = Trim(Strings[0])) then Exit(Items[i].Id);
+      finally
+        Free;
+      end;
+    end;
     pm.PopUp(pt.X, pt.Y);   { returns when the menu is dismissed }
     Application.ProcessMessages;   { the chosen item's action may still be queued }
     Result := pick.Id;
@@ -1441,6 +1466,9 @@ begin
     NM('Add files...', 20),
     NM('Add folders...', 21),
     NM('-', 0),
+    NM('Save playlist...', 22),
+    NM('Load playlist...', 23),
+    NM('-', 0),
     NM('File info / about...', 40),
     NM('Exit', 99)], False);
   DebugLog('main menu -> ' + IntToStr(id));
@@ -1452,6 +1480,8 @@ begin
     12: begin FVisOn := not FVisOn; InvalidateAll; end;
     20: AddFilesDialog;
     21: AddDirDialog;
+    22: SavePlaylistDialog;
+    23: LoadPlaylistDialog;
     40: ShowInfo;
     99: Close;
   end;
@@ -1461,11 +1491,14 @@ procedure TMainForm.ShowAddMenu;
 var
   id: Integer;
 begin
-  id := NativePopup(FPL.Handle, [NM('Add files...', 20), NM('Add folders (with sub-folders)...', 21)], False);
+  id := NativePopup(FPL.Handle, [NM('Add files...', 20), NM('Add folders (with sub-folders)...', 21),
+    NM('-', 0), NM('Save playlist...', 22), NM('Load playlist...', 23)], False);
   DebugLog('add menu -> ' + IntToStr(id));
   case id of
     20: AddFilesDialog;
     21: AddDirDialog;
+    22: SavePlaylistDialog;
+    23: LoadPlaylistDialog;
   end;
 end;
 
@@ -2730,6 +2763,12 @@ end;
 { ===================== playlist / playback logic ===================== }
 { ---------- playlist management ---------- }
 
+function DotFmt: TFormatSettings;
+begin
+  Result := DefaultFormatSettings;
+  Result.DecimalSeparator := '.';
+end;
+
 procedure TMainForm.AddOne(const fn: string);
 begin
   if FCount >= Length(FTracks) then SetLength(FTracks, Max(64, FCount * 2));
@@ -2740,8 +2779,87 @@ begin
   FTracks[FCount].Bad := False;
   FTracks[FCount].Selected := False;
   FTracks[FCount].Id := FNextId;
+  FTracks[FCount].IsCue := False;
+  FTracks[FCount].CueTitle := '';
+  FTracks[FCount].Performer := '';
+  FTracks[FCount].Start := 0;
+  FTracks[FCount].Stop := 0;
   Inc(FNextId);
   Inc(FCount);
+end;
+
+{ a playlist entry: a plain file, or a CUE track (file + range + title / performer) }
+procedure TMainForm.AddEntry(const e: TPlEntry);
+begin
+  if LowerCase(ExtractFileExt(e.Path)) = '.cue' then
+  begin
+    if not e.IsCue then AddCueFile(e.Path);
+    Exit;
+  end;
+  AddOne(e.Path);
+  if e.IsCue then
+  begin
+    with FTracks[FCount - 1] do
+    begin
+      IsCue := True;
+      Start := e.Start; Stop := e.Stop;
+      CueTitle := e.Title; Performer := e.Performer;
+      if Performer <> '' then Title := Performer + ' - ' + CueTitle else Title := CueTitle;
+      if Title = '' then Title := ExtractFileNameOnly(Path);
+      if Stop > Start then Duration := Stop - Start;
+      Scanned := Duration > 0;    { else the scanner works the length out from the file }
+    end;
+  end;
+end;
+
+{ every track of a CUE sheet becomes one row; returns how many }
+function TMainForm.AddCueFile(const fn: string): Integer;
+var
+  tr: TCueTracks;
+  skipped, i: Integer;
+  e: TPlEntry;
+begin
+  Result := 0;
+  if not ParseCueFile(fn, tr, skipped) then
+  begin
+    DebugLog('cue: cannot read ' + fn);
+    Exit;
+  end;
+  DebugLog(Format('cue: %s -> %d track(s)%s', [fn, Length(tr),
+    BoolToStr(skipped > 0, Format(', %d skipped (audio file missing)', [skipped]), '')]));
+  for i := 0 to High(tr) do
+  begin
+    e.Path := tr[i].Audio; e.Title := tr[i].Title; e.Performer := tr[i].Performer;
+    e.IsCue := True; e.Start := tr[i].Start; e.Stop := tr[i].Stop; e.Duration := -1;
+    AddEntry(e);
+    Inc(Result);
+  end;
+end;
+
+{ what identifies a row in the saved playlist (hash, resume) }
+function TMainForm.TrackKey(i: Integer): string;
+begin
+  Result := FTracks[i].Path;
+  if FTracks[i].IsCue then Result := Result + '#' + FormatFloat('0.####', FTracks[i].Start, DotFmt);
+end;
+
+function TMainForm.EntryOf(i: Integer): TPlEntry;
+begin
+  Result.Path := FTracks[i].Path;
+  Result.IsCue := FTracks[i].IsCue;
+  Result.Start := FTracks[i].Start;
+  Result.Stop := FTracks[i].Stop;
+  if FTracks[i].IsCue then
+  begin
+    Result.Title := FTracks[i].CueTitle;
+    Result.Performer := FTracks[i].Performer;
+  end
+  else
+  begin
+    Result.Title := FTracks[i].Title;
+    Result.Performer := '';
+  end;
+  Result.Duration := FTracks[i].Duration;
 end;
 
 function IsAudioFile(const fn: string): Boolean;
@@ -2754,8 +2872,11 @@ end;
 
 function TMainForm.AddPaths(const Paths: array of string): Integer;
 var
-  i, j, oldCount, p, t: Integer;
-  L: TStringList;
+  i, j, k, oldCount, p, t, sk: Integer;
+  L, Owned: TStringList;
+  ents: TPlEntries;
+  tr: TCueTracks;
+  ext: string;
 begin
   oldCount := FCount;
   for i := 0 to High(Paths) do
@@ -2763,37 +2884,35 @@ begin
     if DirectoryExists(Paths[i]) then
     begin
       L := FindAllFiles(Paths[i], AUDIO_MASK, True);
+      Owned := TStringList.Create;      { audio files that a CUE sheet in the list splits into tracks }
       try
         L.Sort;
-        for j := 0 to L.Count - 1 do AddOne(L[j]);
+        for j := 0 to L.Count - 1 do
+          if LowerCase(ExtractFileExt(L[j])) = '.cue' then
+            if ParseCueFile(L[j], tr, sk) then
+              for k := 0 to High(tr) do Owned.Add(LowerCase(tr[k].Audio));
+        for j := 0 to L.Count - 1 do
+          if LowerCase(ExtractFileExt(L[j])) = '.cue' then AddCueFile(L[j])
+          else if Owned.IndexOf(LowerCase(ExpandFileName(L[j]))) < 0 then AddOne(L[j]);
       finally
+        Owned.Free;
         L.Free;
       end;
     end
     else if FileExists(Paths[i]) and (IsAudioFile(Paths[i]) or
       (LowerCase(ExtractFileExt(Paths[i])) = '.m3u') or (LowerCase(ExtractFileExt(Paths[i])) = '.m3u8')) then
     begin
-      if Pos('.m3u', LowerCase(ExtractFileExt(Paths[i]))) = 1 then
-      begin
-        L := TStringList.Create;
-        try
-          L.LoadFromFile(Paths[i]);
-          for j := 0 to L.Count - 1 do
-            if (Trim(L[j]) <> '') and (Trim(L[j])[1] <> '#') then
-            begin
-              if FileExists(Trim(L[j])) then AddOne(Trim(L[j]))
-              else if FileExists(ExtractFilePath(Paths[i]) + Trim(L[j])) then
-                AddOne(ExtractFilePath(Paths[i]) + Trim(L[j]));
-            end;
-        finally
-          L.Free;
-        end;
-      end
+      ext := LowerCase(ExtractFileExt(Paths[i]));
+      if Pos('.m3u', ext) = 1 then
+        LoadPlaylistFile(Paths[i])
+      else if ext = '.cue' then
+        AddCueFile(Paths[i])
       else
         AddOne(Paths[i]);
     end;
   end;
   Result := FCount - oldCount;
+  DebugLog(Format('add: %d new track(s), %d in the list', [Result, FCount]));
   { keep an existing shuffle order valid: insert new tracks at random
     positions among the not-yet-played part }
   if FShuffle and (Result > 0) then
@@ -2896,7 +3015,14 @@ begin
   FStatusMsg := '';
   FCurPath := FTracks[i].Path;
   FTracks[i].Bad := False;
-  if not FTracks[i].Scanned then
+  if FTracks[i].IsCue then
+  begin
+    { a CUE track: play just its part of the file; position, length and seeks are then relative to it }
+    if nca_set_range(FTracks[i].Start, FTracks[i].Stop) = 0 then
+      DebugLog('cue: cannot set the range of ' + FTracks[i].Path);
+    FTracks[i].Scanned := True;
+  end
+  else if not FTracks[i].Scanned then
   begin
     t := ReadTitle(FTracks[i].Path);
     if t <> '' then FTracks[i].Title := t;
@@ -3136,6 +3262,119 @@ begin
     end;
   finally
     dlg.Free;
+  end;
+end;
+
+{ the entries of a playlist file are added; returns how many rows that made }
+function TMainForm.LoadPlaylistFile(const fn: string): Integer;
+var
+  ents: TPlEntries;
+  missing, i, n0: Integer;
+begin
+  n0 := FCount;
+  if not ReadM3U(fn, False, ents, missing) then
+  begin
+    DebugLog('playlist: cannot read ' + fn);
+    Exit(0);
+  end;
+  for i := 0 to High(ents) do AddEntry(ents[i]);
+  Result := FCount - n0;
+  DebugLog(Format('playlist: %s -> %d track(s), %d missing file(s) skipped', [fn, Result, missing]));
+end;
+
+function TestEnv(const Name: string): string;
+{$IFDEF MSWINDOWS}
+var
+  w: UnicodeString;
+begin
+  SetLength(w, 4096);
+  SetLength(w, Windows.GetEnvironmentVariableW(PWideChar(UnicodeString(Name)), PWideChar(w), 4096));
+  Result := UTF8Encode(w);
+end;
+{$ELSE}
+begin
+  Result := GetEnvironmentVariable(Name);
+end;
+{$ENDIF}
+
+{ NCAMP_TEST_SAVE / NCAMP_TEST_LOAD=<file>: test hooks that stand in for the dialogs' result }
+procedure TMainForm.SavePlaylistDialog;
+var
+  dlg: TSaveDialog;
+  fn: string;
+  ents: TPlEntries;
+  i: Integer;
+begin
+  fn := TestEnv('NCAMP_TEST_SAVE');
+  if fn = '' then
+  begin
+    dlg := TSaveDialog.Create(Self);
+    try
+      dlg.Title := 'Save playlist';
+      dlg.Filter := 'Playlist (*.m3u8)|*.m3u8|Playlist (*.m3u)|*.m3u';
+      dlg.DefaultExt := 'm3u8';
+      dlg.FileName := 'playlist.m3u8';
+      if FPlsDir <> '' then dlg.InitialDir := FPlsDir;
+      dlg.Options := dlg.Options + [ofOverwritePrompt, ofPathMustExist];
+      if dlg.Execute then fn := dlg.FileName;
+    finally
+      dlg.Free;
+    end;
+  end;
+  if fn = '' then Exit;
+  if ExtractFileExt(fn) = '' then fn := fn + '.m3u8';
+  FPlsDir := ExtractFilePath(fn);
+  SetLength(ents, FCount);
+  for i := 0 to FCount - 1 do ents[i] := EntryOf(i);
+  if WriteM3U(fn, ents, True) then
+    DebugLog(Format('playlist: saved %d track(s) to %s', [FCount, fn]))
+  else
+  begin
+    DebugLog('playlist: cannot save ' + fn);
+    FStatusMsg := 'Cannot save: ' + ExtractFileName(fn);
+    InvalidateAll;
+  end;
+end;
+
+{ Load replaces the playlist; it only starts playing when the list was empty before (as Add files does) }
+procedure TMainForm.LoadPlaylistDialog;
+var
+  dlg: TOpenDialog;
+  fn: string;
+  ents: TPlEntries;
+  missing, n0: Integer;
+  wasEmpty: Boolean;
+begin
+  fn := TestEnv('NCAMP_TEST_LOAD');
+  if fn = '' then
+  begin
+    dlg := TOpenDialog.Create(Self);
+    try
+      dlg.Title := 'Load playlist';
+      dlg.Filter := 'Playlists (*.m3u8;*.m3u)|*.m3u8;*.m3u|All files|*.*';
+      if FPlsDir <> '' then dlg.InitialDir := FPlsDir;
+      dlg.Options := dlg.Options + [ofFileMustExist];
+      if dlg.Execute then fn := dlg.FileName;
+    finally
+      dlg.Free;
+    end;
+  end;
+  if fn = '' then Exit;
+  FPlsDir := ExtractFilePath(fn);
+  if not ReadM3U(fn, False, ents, missing) or (Length(ents) = 0) then
+  begin
+    DebugLog(Format('playlist: nothing to load from %s (%d missing)', [fn, missing]));
+    FStatusMsg := 'No playable files in ' + ExtractFileName(fn);
+    InvalidateAll;
+    Exit;
+  end;
+  wasEmpty := FCount = 0;
+  if not wasEmpty then ClearList;
+  FStatusMsg := '';
+  n0 := FCount;
+  if (AddPaths([fn]) > 0) and wasEmpty and (FState = psStopped) then
+  begin
+    if FShuffle then UserPlay(n0 + Random(FCount - n0)) else UserPlay(n0);
   end;
 end;
 
@@ -3389,7 +3628,19 @@ begin
   begin
     if not FTracks[FScanPos].Scanned then
     begin
-      if ReadTrackInfo(FTracks[FScanPos].Path, title, dur) then
+      if FTracks[FScanPos].IsCue then
+      begin
+        { a CUE track: its length is known unless it is the last of its file (then: file length - start) }
+        if FTracks[FScanPos].Stop > FTracks[FScanPos].Start then
+          FTracks[FScanPos].Duration := FTracks[FScanPos].Stop - FTracks[FScanPos].Start
+        else if ReadTrackInfo(FTracks[FScanPos].Path, title, dur) then
+        begin
+          if dur > FTracks[FScanPos].Start then FTracks[FScanPos].Duration := dur - FTracks[FScanPos].Start;
+        end
+        else
+          FTracks[FScanPos].Bad := True;
+      end
+      else if ReadTrackInfo(FTracks[FScanPos].Path, title, dur) then
       begin
         if title <> '' then FTracks[FScanPos].Title := title;
         FTracks[FScanPos].Duration := dur;
@@ -3452,12 +3703,6 @@ end;
 
 const
   AUTOSAVE_MS = 30000;     { periodic save while playing (crash / power loss / kill) }
-
-function DotFmt: TFormatSettings;
-begin
-  Result := DefaultFormatSettings;
-  Result.DecimalSeparator := '.';
-end;
 
 { write a text file via a temporary file + atomic replace, so a crash or power loss
   while saving can never leave a truncated playlist / ini behind }
@@ -3530,25 +3775,22 @@ var
   i, curIdx: Integer;
   h: QWord;
   ok: Boolean;
+  ents: TPlEntries;
 begin
   FLastSave := GetTickCount64;
   try
     dir := ConfigDir;
     { the playlist is only rewritten when it actually changed }
     h := QWord(14695981039346656037);
-    for i := 0 to FCount - 1 do h := PathHash(FTracks[i].Path, h);
+    for i := 0 to FCount - 1 do h := PathHash(TrackKey(i), h);
     if not FPLHashOk or (h <> FPLHash) or not FileExists(dir + 'playlist.m3u8') then
     begin
-      L := TStringList.Create;
-      try
-        for i := 0 to FCount - 1 do L.Add(FTracks[i].Path);
-        if SaveLinesAtomic(L, dir + 'playlist.m3u8') then
-        begin
-          FPLHash := h;
-          FPLHashOk := True;
-        end;
-      finally
-        L.Free;
+      SetLength(ents, FCount);
+      for i := 0 to FCount - 1 do ents[i] := EntryOf(i);
+      if WriteM3U(dir + 'playlist.m3u8', ents, False) then
+      begin
+        FPLHash := h;
+        FPLHashOk := True;
       end;
     end;
     ini := TMemIniFile.Create(dir + 'nc-amp.ini');
@@ -3566,6 +3808,7 @@ begin
       ini.WriteInteger('main', 'plrows', FPLRows);
       ini.WriteInteger('main', 'rowh', ROWH);
       ini.WriteBool('main', 'plmatch', FPLMatch);
+      if FPlsDir <> '' then ini.WriteString('main', 'plsdir', FPlsDir);
       if ShownOnce then
       begin
         ini.WriteInteger('pos', 'left', Left);
@@ -3622,6 +3865,7 @@ var
   i, n, v: Integer;
   parts: TStringArray;
   h: QWord;
+  ents: TPlEntries;
 begin
   FResHave := False;
   FResIdx := -1; FResOrderPos := -1; FResPos := 0;
@@ -3631,20 +3875,13 @@ begin
     dir := ConfigDir;
     if FileExists(dir + 'playlist.m3u8') then
     begin
-      L := TStringList.Create;
-      try
-        L.LoadFromFile(dir + 'playlist.m3u8');
-        n := 0;
-        for i := 0 to L.Count - 1 do
-          if L[i] <> '' then
-          begin
-            SetLength(FLineMap, n + 1);
-            FLineMap[n] := FCount;   { saved index n -> track index }
-            AddOne(L[i]);
-            Inc(n);
-          end;
-      finally
-        L.Free;
+      { the entries of the saved list in order (missing files stay: the saved indices must match) }
+      ReadM3U(dir + 'playlist.m3u8', True, ents, n);
+      SetLength(FLineMap, Length(ents));
+      for i := 0 to High(ents) do
+      begin
+        FLineMap[i] := FCount;   { saved index i -> track index }
+        AddEntry(ents[i]);
       end;
     end;
     if FileExists(dir + 'nc-amp.ini') then
@@ -3669,6 +3906,7 @@ begin
           FPLRows := Round(FPLRows * ini.ReadInteger('main', 'rowh', 15) / ROWH);
         FPLRows := EnsureRange(FPLRows, 4, 120);
         FPLMatch := ini.ReadBool('main', 'plmatch', False);
+        FPlsDir := ini.ReadString('main', 'plsdir', '');
         FFocus := ini.ReadInteger('main', 'current', -1);
         if FFocus >= FCount then FFocus := -1;
         if FFocus >= 0 then
@@ -3686,7 +3924,7 @@ begin
           FResOrderPos := ini.ReadInteger('resume', 'orderpos', -1);
           ord := ini.ReadString('resume', 'order', '');
           h := QWord(14695981039346656037);
-          for i := 0 to FCount - 1 do h := PathHash(FTracks[i].Path, h);
+          for i := 0 to FCount - 1 do h := PathHash(TrackKey(i), h);
           if (ord <> '') and not SameText(ini.ReadString('resume', 'plhash', ''), IntToHex(h, 16)) then
           begin
             DebugLog('resume: playlist changed since the order was saved; the shuffle order will be rebuilt');

@@ -15,7 +15,9 @@ nc-amp —— 基于 Free Pascal/Lazarus 的原生开源音乐播放器，支持
 
 - **Windows（64 位）与 macOS（Apple 芯片）**：同一套代码，两个平台的播放器、皮肤和快捷键完全一致。
 - **单文件绿色版**：Windows x64 下一个 exe、macOS 下一个独立的 app 即可运行，无需安装，不产生额外文件。
-- **支持格式**：MP3、FLAC、APE（Monkey's Audio）、WAV、Ogg Vorbis、Opus、M4A / AAC（AAC 使用系统自带解码器：Windows 的 Media Foundation、macOS 的 AudioToolbox；macOS 上还可播放 ALAC、AIFF、CAF）。
+- **支持格式**：MP3、FLAC、APE（Monkey's Audio）、WAV、Ogg Vorbis、Opus、M4A / AAC（AAC 使用系统自带解码器：Windows 的 Media Foundation、macOS 的 AudioToolbox；macOS 上还可播放 ALAC、AIFF、CAF）；整轨镜像可配合 CUE 分轨（`.cue`）；播放列表为 M3U / M3U8。
+- **CUE 分轨**：添加 `.cue` 文件（添加文件、拖放、文件夹扫描、命令行、从资源管理器 / Finder 打开）后，其中每个音轨成为播放列表中独立的一行，标题取自 CUE 的“演唱者 - 标题”，各有自己的时长、进度条和自动切歌。支持对应 FLAC、APE、WAV、MP3 等文件的 CUE、一个 CUE 内多个 `FILE`、相对路径，以及 UTF-8（带或不带 BOM）、UTF-16、GBK / GB18030（中文 CUE）编码。扫描文件夹时，已被文件夹内 CUE 拆分的音频文件不会再作为整轨重复添加。
+- **保存 / 载入播放列表**：“Save playlist...” / “Load playlist...”（右键菜单和播放列表的 ADD 菜单）读写标准 `.m3u8`（UTF-8）文件，包含 CUE 音轨；位于播放列表所在文件夹之下的文件按相对路径保存。
 - **拖入即播**：把文件或文件夹（递归扫描）拖到任一窗口，立即开始播放。
 - **永远随机 + 循环**：每轮每首只播一次，播完后重新洗牌；新一轮不会以刚播完的曲目开头。
 - **经典双窗口布局**：枪灰色外壳配灰绿色 LCD，实时 FFT 频谱，进度、音量、声道平衡，码率 / 采样率 / 立体声显示；独立播放列表窗口，可停靠、吸附、调整大小。
@@ -50,7 +52,7 @@ macOS 上 nc-amp 没有 Dock 图标，也没有自己的菜单栏：请使用菜
 - 点击时间切换已播放 / 剩余时间；点击频谱开关可视化。
 - 双击标题栏（或点击三角按钮）卷起 / 展开窗口。
 - 把停靠的播放列表调到与主窗口差不多高，它会自动精确锁定为同一高度。
-- 在任意位置右键可设置尺寸、播放列表、可视化、添加文件 / 文件夹、信息和退出。
+- 在任意位置右键可设置尺寸、播放列表、可视化、添加文件 / 文件夹、保存 / 载入播放列表、信息和退出。“载入播放列表”会替换当前列表（仅当原列表为空时才自动开始播放）；而把 `.m3u` / `.m3u8` 文件拖入窗口则是把其中的曲目追加到列表。
 - 左键单击托盘图标（Windows）或菜单栏图标（macOS）显示 / 隐藏窗口；右键点击它进行播放控制。
 - 设置在 Windows 上保存在 `%LOCALAPPDATA%\nc-amp\`，在 macOS 上保存在 `~/Library/Application Support/nc-amp/`（`nc-amp.ini`、`playlist.m3u8`）。
 
@@ -109,7 +111,7 @@ LAZBUILD=/path/to/lazbuild LAZBUILD_ARGS="--lazarusdir=/path/to/lazarus" scripts
 ### 目录结构
 
 ```
-src/common/     两个平台共用的 Pascal 单元（播放器窗口、音频绑定、标签、字体）
+src/common/     两个平台共用的 Pascal 单元（播放器窗口、音频绑定、标签、CUE 与 M3U 解析、字体）
 src/win/        Windows 单元、Lazarus 工程（nc-amp.lpi）、清单、图标、资源
 src/mac/        macOS 单元、Lazarus 工程（nc-amp.lpi）、Info.plist、测试驱动
 src/engine/     音频引擎（C）：miniaudio + stb_vorbis + opusfile + libdemac（APE）；ncape.c 为 APE 读取模块
@@ -117,6 +119,7 @@ src/engine/win/ Windows 部分：Media Foundation（AAC）后端、C 运行库�
 src/engine/mac/ macOS 部分：AudioToolbox（AAC / ALAC / AIFF / CAF）后端、平台头文件
 third_party/    内置库（miniaudio、stb_vorbis、libdemac）与固定版本的依赖清单
 tests/ape/      APE 解码测试（与 Monkey's Audio 解码器逐位一致）
+tests/cue/      CUE 支持测试（解析器 + 引擎，使用生成的测试素材）
 assets/fonts/   IBM Plex Mono、Audiowide 字体（OFL）及标题字形生成脚本
 assets/icon/    程序图标（.ico、.icns）及其生成脚本
 docs/           截图
