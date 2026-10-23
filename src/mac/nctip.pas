@@ -162,8 +162,7 @@ end;
 procedure TNcTip.Apply(const Txt: string);
 var
   w: TTipWin;
-  attrs: NSDictionary;
-  r: NSRect;
+  sz: NSSize;
   s: NSString;
 begin
   w := TTipWin(FWin);
@@ -172,11 +171,11 @@ begin
   w.Lbl.setTextColor(NSCol(FFg));
   s := NSString.stringWithUTF8String(PChar(Txt));   { UTF-8: Chinese titles must not turn into garbage }
   w.Lbl.setStringValue(s);
-  attrs := NSDictionary.dictionaryWithObject_forKey(NSFont.systemFontOfSize(FONT_PT), NSFontAttributeName);
-  r := s.boundingRectWithSize_options_attributes(NSMakeSize(MAXW, 10000),
-    NSStringDrawingUsesLineFragmentOrigin or NSStringDrawingUsesFontLeading, attrs);
-  w.TextW := Ceil(r.size.width) + 8;   { slack so the label never wraps / clips the last characters }
-  w.TextH := Ceil(r.size.height) + 2;
+  { the cell's own size: it includes the cell's equal left / right insets, so the text sits
+    centred in the label and the four margins around it are equal }
+  sz := w.Lbl.cell.cellSizeForBounds(NSMakeRect(0, 0, MAXW, 10000));
+  w.TextW := Ceil(sz.width);
+  w.TextH := Ceil(sz.height);
   w.Lbl.setFrame(NSMakeRect(PAD + BW, PAD + BW, w.TextW, w.TextH));
   w.Panel.setContentSize(NSMakeSize(w.TextW + 2 * (PAD + BW), w.TextH + 2 * (PAD + BW)));
 end;
